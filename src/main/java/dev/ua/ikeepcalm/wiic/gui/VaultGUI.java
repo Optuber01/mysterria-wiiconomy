@@ -273,6 +273,7 @@ public class VaultGUI {
         TransactionLogger.logBalance(player, before, "before deposit");
         boolean success = VaultUtil.deposit(player.getUniqueId(), amount);
         TransactionLogger.logDeposit(player, item, amount, success);
+        MysterriaAuditBridge.emitWallet("deposited", player, item, amount, success);
         TransactionLogger.logBalance(player, currentBalance(player), "after deposit");
         if (!success) {
             Bukkit.getScheduler().runTask(WIIC.INSTANCE, () -> {
@@ -305,6 +306,7 @@ public class VaultGUI {
         TransactionLogger.logBalance(player, before, "before withdraw");
         boolean success = VaultUtil.withdraw(player.getUniqueId(), amount);
         TransactionLogger.logWithdraw(player, item, amount, success);
+        MysterriaAuditBridge.emitWallet("withdrawn", player, item, amount, success);
         TransactionLogger.logBalance(player, currentBalance(player), "after withdraw");
         if (!success) {
             Bukkit.getScheduler().runTask(WIIC.INSTANCE, () ->
@@ -320,6 +322,7 @@ public class VaultGUI {
         TransactionLogger.logBalance(player, before, "before sell");
         boolean success = VaultUtil.deposit(player.getUniqueId(), value);
         TransactionLogger.logSell(player, item, value, success);
+        MysterriaAuditBridge.emitWallet("sold", player, item, value, success);
         TransactionLogger.logBalance(player, currentBalance(player), "after sell");
         if (!success) {
             Bukkit.getScheduler().runTask(WIIC.INSTANCE, () -> {
