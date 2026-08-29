@@ -8,10 +8,13 @@ import dev.ua.ikeepcalm.wiic.domain.agora.ledger.model.LedgerEntry;
 import dev.ua.ikeepcalm.wiic.domain.agora.utils.journal.MarketJournal;
 import dev.ua.ikeepcalm.wiic.utils.TransactionLogger;
 import dev.ua.ikeepcalm.wiic.utils.VaultUtil;
+import dev.ua.ikeepcalm.wiic.utils.MysterriaAuditBridge;
 import org.bukkit.Bukkit;
 import org.bukkit.entity.Player;
 
 import java.util.List;
+import java.util.Map;
+import java.math.BigDecimal;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
@@ -77,6 +80,7 @@ public class LedgerService {
         }
 
         String batchId = UUID.randomUUID().toString();
+        MysterriaAuditBridge.AuditIdentity identity = MysterriaAuditBridge.identity("ledger-claim", batchId);
         db.transactionThenMain(conn -> LedgerDao.beginClaim(conn, uuid), sum -> {
             if (sum <= 0) {
                 IN_FLIGHT.remove(uuid);
@@ -95,9 +99,13 @@ public class LedgerService {
             }
 
             Bukkit.getScheduler().runTaskAsynchronously(plugin, () -> {
+                BigDecimal balanceBefore = balance(uuid);
                 boolean deposited = VaultUtil.deposit(uuid, sum);
                 if (!deposited) {
                     TransactionLogger.logNote(owner, "MARKET LEDGER claim deposit of " + sum + " coppets FAILED");
+                    MysterriaAuditBridge.emit("ledger.claim_failed", false, uuid, uuid, null, identity,
+                            "proceeds deposit failed", MysterriaAuditBridge.moneyMetadata(0,
+                                    balanceBefore, balance(uuid), Map.of()));
                     journal.remove(batchId);
                     revert(uuid, () -> {
                         IN_FLIGHT.remove(uuid);
@@ -105,6 +113,7 @@ public class LedgerService {
                     });
                     return;
                 }
+                BigDecimal balanceAfterDeposit = balance(uuid);
                 // Marker first: recovery must be able to prove the deposit happened.
                 try {
                     journal.append(MarketJournal.Type.CLAIM_DEPOSITED, batchId, uuid, sum, null);
@@ -131,12 +140,18 @@ public class LedgerService {
                 }, done -> {
                     journal.remove(batchId);
                     TransactionLogger.logNote(owner, "MARKET LEDGER claimed " + sum + " coppets");
+                    MysterriaAuditBridge.emit("ledger.claimed", true, uuid, uuid, null, identity,
+                            "proceeds claimed", MysterriaAuditBridge.moneyMetadata(sum,
+                                    balanceBefore, balanceAfterDeposit, Map.of()));
                     IN_FLIGHT.remove(uuid);
                     callback.accept(true, sum);
                 }, error -> {
                     // Deposit landed but the CLAIMED flip failed — recovery replays it from the journal.
                     plugin.getLogger().severe("Ledger finishClaim failed for " + owner.getName()
                             + " (journal will complete on restart): " + error);
+                    MysterriaAuditBridge.emit("ledger.claimed", true, uuid, uuid, null, identity,
+                            "proceeds deposited; claim pending recovery", MysterriaAuditBridge.moneyMetadata(sum,
+                                    balanceBefore, balanceAfterDeposit, Map.of()));
                     IN_FLIGHT.remove(uuid);
                     callback.accept(true, sum);
                 });
@@ -144,8 +159,16 @@ public class LedgerService {
         }, error -> {
             IN_FLIGHT.remove(uuid);
             plugin.getLogger().severe("Ledger beginClaim failed for " + owner.getName() + ": " + error);
+            MysterriaAuditBridge.emit("ledger.claim_failed", false, uuid, uuid, null, identity,
+                    "claim initialization failed", MysterriaAuditBridge.moneyMetadata(0, Map.of()));
             callback.accept(false, 0L);
         });
+    }
+
+    private static BigDecimal balance(UUID uuid) {
+        if (WIIC.getEcon() == null) return BigDecimal.ZERO;
+        BigDecimal balance = WIIC.getEcon().balance("iConomyUnlocked", uuid);
+        return balance != null ? balance : BigDecimal.ZERO;
     }
 
     private void revert(UUID uuid, Runnable then) {

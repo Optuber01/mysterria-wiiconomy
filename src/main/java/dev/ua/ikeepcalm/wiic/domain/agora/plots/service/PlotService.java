@@ -14,6 +14,7 @@ import dev.ua.ikeepcalm.wiic.domain.agora.utils.coi.ItemInspector;
 import dev.ua.ikeepcalm.wiic.utils.TransactionLogger;
 import dev.ua.ikeepcalm.wiic.utils.VaultUtil;
 import dev.ua.ikeepcalm.wiic.utils.WorldUtil;
+import dev.ua.ikeepcalm.wiic.utils.MysterriaAuditBridge;
 import net.kyori.adventure.text.minimessage.MiniMessage;
 import org.bukkit.Bukkit;
 import org.bukkit.Location;
@@ -48,6 +49,7 @@ import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.function.Consumer;
+import java.math.BigDecimal;
 
 /**
  * Owns prestige plots: the config-defined regions, who rents them, build rights
@@ -225,6 +227,7 @@ public class PlotService {
      */
     public void rent(Player player, String plotId, Consumer<RentResult> callback) {
         UUID uuid = player.getUniqueId();
+        MysterriaAuditBridge.AuditIdentity identity = MysterriaAuditBridge.randomIdentity("plot-rent");
         if (!enabled()) {
             callback.accept(RentResult.DISABLED);
             return;
@@ -252,11 +255,16 @@ public class PlotService {
         long paidUntil = now + config.plotPeriodMs();
 
         Bukkit.getScheduler().runTaskAsynchronously(plugin, () -> {
+            BigDecimal balanceBefore = balance(uuid);
             if (price > 0 && !VaultUtil.withdraw(uuid, price)) {
                 TransactionLogger.logNote(player, "MARKET PLOT rent withdraw of " + price + " coppets failed");
+                MysterriaAuditBridge.emit("plots.rent.failed", false, uuid, uuid, null, identity,
+                        "rent withdrawal failed", MysterriaAuditBridge.moneyMetadata(0,
+                                balanceBefore, balance(uuid), Map.of("plot_id", plotId)));
                 finish(uuid, callback, RentResult.INSUFFICIENT_FUNDS);
                 return;
             }
+            BigDecimal balanceAfterCharge = balance(uuid);
             db.transactionThenMain(conn -> {
                 if (PlotDao.countByRenter(conn, uuid) >= config.plotMaxPerPlayer()) {
                     throw new PlotDenied(RentResult.MAX_PLOTS);
@@ -270,15 +278,21 @@ public class PlotService {
                 rentals.put(plotId, rental);
                 TransactionLogger.logNote(player, "MARKET PLOT rent " + plotId + " for " + price
                         + " coppets until " + paidUntil);
+                MysterriaAuditBridge.emit("plots.rent.committed", true, uuid, uuid, null, identity,
+                        "plot rent committed", MysterriaAuditBridge.moneyMetadata(-price,
+                                balanceBefore, balanceAfterCharge, Map.of("plot_id", plotId, "paid_until", paidUntil)));
                 spawnVendor(region, plotId);
                 IN_FLIGHT.remove(uuid);
                 callback.accept(RentResult.SUCCESS);
             }, error -> {
                 RentResult result = error instanceof PlotDenied denied ? denied.result : RentResult.ERROR;
-                refund(player, uuid, price, "plot claim rejected: " + result);
+                refund(player, uuid, price, "plot claim rejected: " + result, identity);
                 if (result == RentResult.ERROR) {
                     plugin.getLogger().severe("Plot rent failed for " + player.getName() + " on " + plotId + ": " + error);
                 }
+                MysterriaAuditBridge.emit("plots.rent.failed", false, uuid, uuid, null, identity,
+                        result.name().toLowerCase(), MysterriaAuditBridge.moneyMetadata(-price,
+                                balanceBefore, balanceAfterCharge, Map.of("plot_id", plotId)));
                 finish(uuid, callback, result);
             });
         });
@@ -287,6 +301,7 @@ public class PlotService {
     /** Pays for one more period on a plot the player already holds. */
     public void extend(Player player, String plotId, Consumer<RentResult> callback) {
         UUID uuid = player.getUniqueId();
+        MysterriaAuditBridge.AuditIdentity identity = MysterriaAuditBridge.randomIdentity("plot-upkeep");
         PlotRental current = rentals.get(plotId);
         if (current == null || !current.renterUuid().equals(uuid)) {
             callback.accept(RentResult.UNKNOWN_PLOT);
@@ -302,11 +317,16 @@ public class PlotService {
         long period = config.plotPeriodMs();
 
         Bukkit.getScheduler().runTaskAsynchronously(plugin, () -> {
+            BigDecimal balanceBefore = balance(uuid);
             if (price > 0 && !VaultUtil.withdraw(uuid, price)) {
                 TransactionLogger.logNote(player, "MARKET PLOT upkeep withdraw of " + price + " coppets failed");
+                MysterriaAuditBridge.emit("plots.rent.upkeep_failed", false, uuid, uuid, null, identity,
+                        "upkeep withdrawal failed", MysterriaAuditBridge.moneyMetadata(0,
+                                balanceBefore, balance(uuid), Map.of("plot_id", plotId)));
                 finish(uuid, callback, RentResult.INSUFFICIENT_FUNDS);
                 return;
             }
+            BigDecimal balanceAfterCharge = balance(uuid);
             db.transactionThenMain(conn -> {
                 if (!PlotDao.extend(conn, plotId, uuid, now, period)) {
                     throw new PlotDenied(RentResult.UNKNOWN_PLOT);
@@ -318,13 +338,20 @@ public class PlotService {
                 overdueNotified.remove(plotId);
                 TransactionLogger.logNote(player, "MARKET PLOT upkeep " + plotId + " paid to "
                         + (updated != null ? updated.paidUntil() : "?"));
+                MysterriaAuditBridge.emit("plots.rent.upkeep", true, uuid, uuid, null, identity,
+                        "plot upkeep committed", MysterriaAuditBridge.moneyMetadata(-price,
+                                balanceBefore, balanceAfterCharge, Map.of("plot_id", plotId,
+                                        "paid_until", updated != null ? updated.paidUntil() : 0L)));
                 finish(uuid, callback, RentResult.SUCCESS);
             }, error -> {
                 RentResult result = error instanceof PlotDenied denied ? denied.result : RentResult.ERROR;
-                refund(player, uuid, price, "plot extend rejected: " + result);
+                refund(player, uuid, price, "plot extend rejected: " + result, identity);
                 if (result == RentResult.ERROR) {
                     plugin.getLogger().severe("Plot extend failed for " + player.getName() + " on " + plotId + ": " + error);
                 }
+                MysterriaAuditBridge.emit("plots.rent.upkeep_failed", false, uuid, uuid, null, identity,
+                        result.name().toLowerCase(), MysterriaAuditBridge.moneyMetadata(-price,
+                                balanceBefore, balanceAfterCharge, Map.of("plot_id", plotId)));
                 finish(uuid, callback, result);
             });
         });
@@ -514,6 +541,7 @@ public class PlotService {
     private void finishEviction(PlotRental rental, @Nullable PlotRegion region,
                                 @Nullable List<StashItem> harvested, String reason, Consumer<Boolean> callback) {
         String plotId = rental.plotId();
+        MysterriaAuditBridge.AuditIdentity identity = MysterriaAuditBridge.randomIdentity("plot-eviction");
         db.transactionThenMain(conn -> {
             if (harvested != null) {
                 for (StashItem item : harvested) StashDao.insert(conn, item);
@@ -525,6 +553,8 @@ public class PlotService {
         }, snapshot -> {
             rentals.remove(plotId);
             overdueNotified.remove(plotId);
+            MysterriaAuditBridge.emit("plots.eviction.committed", true, rental.renterUuid(), rental.renterUuid(), null, identity,
+                    reason, Map.of("plot_id", plotId, "harvested_stacks", harvested == null ? 0 : harvested.size()));
             // After the commit, before the blocks are replayed: the counters must stop
             // trading the moment the rental is gone, not when the restore finishes.
             if (onEvicted != null) onEvicted.accept(plotId);
@@ -553,6 +583,8 @@ public class PlotService {
         }, error -> {
             evicting.remove(plotId);
             plugin.getLogger().severe("Plot eviction commit failed for " + plotId + ": " + error);
+            MysterriaAuditBridge.emit("plots.eviction.failed", false, rental.renterUuid(), rental.renterUuid(), null, identity,
+                    "eviction commit failed", Map.of("plot_id", plotId));
             if (harvested != null && !harvested.isEmpty()) {
                 // Clear-then-commit's loss window: name what went missing so staff can restore it.
                 for (StashItem item : harvested) {
@@ -657,16 +689,27 @@ public class PlotService {
         return region != null ? region.displayName() : plotId;
     }
 
-    private void refund(Player player, UUID uuid, long amount, String reason) {
+    private void refund(Player player, UUID uuid, long amount, String reason,
+                        MysterriaAuditBridge.AuditIdentity identity) {
         if (amount <= 0) return;
         Bukkit.getScheduler().runTaskAsynchronously(plugin, () -> {
+            BigDecimal balanceBefore = balance(uuid);
             boolean refunded = VaultUtil.deposit(uuid, amount);
+            MysterriaAuditBridge.emit("plots.rent.refunded", refunded, uuid, uuid, null, identity,
+                    reason, MysterriaAuditBridge.moneyMetadata(refunded ? amount : 0,
+                            balanceBefore, balance(uuid), Map.of()));
             TransactionLogger.logNote(player, "MARKET PLOT refund of " + amount + " coppets ("
                     + reason + ") " + (refunded ? "OK" : "FAILED"));
             if (!refunded) {
                 plugin.getLogger().severe("Failed to refund plot rent of " + amount + " coppets to " + uuid);
             }
         });
+    }
+
+    private static BigDecimal balance(UUID uuid) {
+        if (WIIC.getEcon() == null) return BigDecimal.ZERO;
+        BigDecimal balance = WIIC.getEcon().balance("iConomyUnlocked", uuid);
+        return balance != null ? balance : BigDecimal.ZERO;
     }
 
     /** Expected rent/upkeep rejections decided inside the DB transaction, not failures. */

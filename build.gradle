@@ -94,7 +94,12 @@ dependencies {
         exclude group: '*', module: '*'
     }
     compileOnly 'com.incredibleplugins:lands-api:8.0.0'
-    compileOnly 'dev.djecka2k19:undeadpostmans-api:1.0.0-SNAPSHOT'
+    def undeadPostmansApiJar = project.findProperty('undeadPostmansApiJar') ?: System.getenv('UNDEAD_POSTMANS_API_JAR')
+    if (undeadPostmansApiJar) {
+        compileOnly files(undeadPostmansApiJar)
+    } else {
+        compileOnly 'dev.djecka2k19:undeadpostmans-api:1.0.0-SNAPSHOT'
+    }
     compileOnly 'net.thenextlvl:worlds:4.2.2'
     def coiApiJar = project.findProperty('coiApiJar')
     if (coiApiJar) {

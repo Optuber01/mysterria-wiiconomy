@@ -8,6 +8,7 @@ import dev.ua.ikeepcalm.wiic.domain.shop.model.ShopEntry;
 import dev.ua.ikeepcalm.wiic.domain.shop.model.ShopPricing;
 import dev.ua.ikeepcalm.wiic.utils.TransactionLogger;
 import dev.ua.ikeepcalm.wiic.utils.VaultUtil;
+import dev.ua.ikeepcalm.wiic.utils.MysterriaAuditBridge;
 import org.bukkit.Bukkit;
 import org.bukkit.Material;
 import org.bukkit.entity.Player;
@@ -78,36 +79,43 @@ public class PurchaseService {
      */
     public void purchase(Player player, Material material, int amount, long quotedUnitPrice, Consumer<PurchaseOutcome> callback) {
         UUID uuid = player.getUniqueId();
+        MysterriaAuditBridge.AuditIdentity identity = MysterriaAuditBridge.randomIdentity("shop-purchase");
 
         if (!IN_FLIGHT.add(uuid)) {
+            emit(player, material, amount, identity, false, "already in progress", 0, null, null);
             callback.accept(new PurchaseOutcome(Result.ALREADY_IN_PROGRESS, 0, 0, 0, 0));
             return;
         }
 
         long last = lastPurchaseAt.getOrDefault(uuid, 0L);
         if (System.currentTimeMillis() - last < shopConfig.cooldownMs()) {
+            emit(player, material, amount, identity, false, "cooldown", 0, null, null);
             finish(uuid, callback, new PurchaseOutcome(Result.COOLDOWN, 0, 0, 0, 0));
             return;
         }
 
         ShopEntry entry = catalog.get(material);
         if (entry == null) {
+            emit(player, material, amount, identity, false, "not purchasable", 0, null, null);
             finish(uuid, callback, new PurchaseOutcome(Result.NOT_PURCHASABLE, 0, 0, 0, 0));
             return;
         }
 
         if (amount < 1 || amount > shopConfig.maxPerPurchase()) {
+            emit(player, material, amount, identity, false, "invalid amount", 0, null, null);
             finish(uuid, callback, new PurchaseOutcome(Result.INVALID_AMOUNT, 0, 0, 0, 0));
             return;
         }
 
         long liveUnitPrice = pricing.unitPrice(material);
         if (liveUnitPrice < 0) {
+            emit(player, material, amount, identity, false, "not purchasable", 0, null, null);
             finish(uuid, callback, new PurchaseOutcome(Result.NOT_PURCHASABLE, 0, 0, 0, 0));
             return;
         }
         if (liveUnitPrice > quotedUnitPrice) {
             // Never charge more than what the player was shown; make them re-confirm instead.
+            emit(player, material, amount, identity, false, "price changed", 0, null, null);
             finish(uuid, callback, new PurchaseOutcome(Result.PRICE_CHANGED, liveUnitPrice, 0, 0, 0));
             return;
         }
@@ -121,6 +129,7 @@ public class PurchaseService {
 
             if (before.compareTo(BigDecimal.valueOf(total)) < 0) {
                 TransactionLogger.logPurchase(player, material, amount, total, indexAtPurchase, false);
+                emit(player, material, amount, identity, false, "insufficient funds", total, before, before);
                 Bukkit.getScheduler().runTask(plugin, () ->
                         finish(uuid, callback, new PurchaseOutcome(Result.INSUFFICIENT_FUNDS, chargedUnitPrice, total, 0, 0)));
                 return;
@@ -129,11 +138,13 @@ public class PurchaseService {
             boolean withdrawn = VaultUtil.withdraw(uuid, total);
             if (!withdrawn) {
                 TransactionLogger.logPurchase(player, material, amount, total, indexAtPurchase, false);
+                emit(player, material, amount, identity, false, "withdraw failed", total, before, currentBalance(uuid));
                 plugin.getLogger().warning("Shop withdraw of " + total + " coppets failed for " + player.getName() + " (" + uuid + ")");
                 Bukkit.getScheduler().runTask(plugin, () ->
                         finish(uuid, callback, new PurchaseOutcome(Result.WITHDRAW_FAILED, chargedUnitPrice, total, 0, 0)));
                 return;
             }
+            BigDecimal balanceAfterCharge = currentBalance(uuid);
 
             Bukkit.getScheduler().runTask(plugin, () -> {
                 Player online = Bukkit.getPlayer(uuid);
@@ -141,7 +152,12 @@ public class PurchaseService {
                     // Left between charge and delivery — refund. Money is authoritative,
                     // delivery is the fallible step, so this is the safe failure direction.
                     Bukkit.getScheduler().runTaskAsynchronously(plugin, () -> {
+                        BigDecimal refundBefore = currentBalance(uuid);
                         boolean refunded = VaultUtil.deposit(uuid, total);
+                        BigDecimal refundAfter = currentBalance(uuid);
+                        MysterriaAuditBridge.emit("shop.refunded", refunded, uuid, uuid, null, identity,
+                                "delivery aborted: offline", MysterriaAuditBridge.moneyMetadata(
+                                        refunded ? total : 0, refundBefore, refundAfter, Map.of()));
                         TransactionLogger.logNote(player, "PURCHASE delivery aborted (offline) — refund of " + total
                                 + " coppets " + (refunded ? "OK" : "FAILED"));
                         if (!refunded) {
@@ -149,6 +165,8 @@ public class PurchaseService {
                                     + player.getName() + " (" + uuid + ") after aborted shop delivery!");
                         }
                     });
+                    emit(player, material, amount, identity, false, "delivery aborted: offline", total,
+                            before, balanceAfterCharge);
                     finish(uuid, callback, new PurchaseOutcome(Result.PLAYER_OFFLINE, chargedUnitPrice, total, 0, 0));
                     return;
                 }
@@ -160,6 +178,8 @@ public class PurchaseService {
                 try {
                     DeliveryResult delivery = deliver(online, material, amount);
                     TransactionLogger.logPurchase(online, material, amount, total, indexAtPurchase, true);
+                    emit(online, material, amount, identity, true, "purchase delivered", total,
+                            before, balanceAfterCharge);
                     Bukkit.getScheduler().runTaskAsynchronously(plugin, () ->
                             TransactionLogger.logBalance(online, currentBalance(uuid), "after shop purchase"));
                     finish(uuid, callback, new PurchaseOutcome(Result.SUCCESS, chargedUnitPrice, total, delivery.delivered(), delivery.droppedStacks()));
@@ -167,7 +187,12 @@ public class PurchaseService {
                     plugin.getLogger().severe("Shop delivery failed for " + online.getName()
                             + " after charging " + total + " coppets, refunding: " + t);
                     Bukkit.getScheduler().runTaskAsynchronously(plugin, () -> {
+                        BigDecimal refundBefore = currentBalance(uuid);
                         boolean refunded = VaultUtil.deposit(uuid, total);
+                        BigDecimal refundAfter = currentBalance(uuid);
+                        MysterriaAuditBridge.emit("shop.refunded", refunded, uuid, uuid, null, identity,
+                                "delivery failed", MysterriaAuditBridge.moneyMetadata(
+                                        refunded ? total : 0, refundBefore, refundAfter, Map.of()));
                         TransactionLogger.logNote(player, "PURCHASE delivery failed — refund of " + total
                                 + " coppets " + (refunded ? "OK" : "FAILED"));
                         if (!refunded) {
@@ -175,10 +200,23 @@ public class PurchaseService {
                                     + player.getName() + " (" + uuid + ") after failed shop delivery!");
                         }
                     });
+                    emit(player, material, amount, identity, false, "delivery failed", total,
+                            before, balanceAfterCharge);
                     finish(uuid, callback, new PurchaseOutcome(Result.WITHDRAW_FAILED, chargedUnitPrice, total, 0, 0));
                 }
             });
         });
+    }
+
+    private static void emit(Player player, Material material, int itemAmount,
+                             MysterriaAuditBridge.AuditIdentity identity,
+                             boolean success, String reason, long coppets,
+                             BigDecimal before, BigDecimal after) {
+        long delta = before != null && after != null && before.compareTo(after) > 0 ? -coppets : 0;
+        MysterriaAuditBridge.emit("shop.purchased", success, player.getUniqueId(),
+                player.getUniqueId(), null, identity, reason,
+                MysterriaAuditBridge.moneyMetadata(delta, before, after,
+                        Map.of("material", material.name().toLowerCase(), "item_amount", itemAmount)));
     }
 
     private void finish(UUID uuid, Consumer<PurchaseOutcome> callback, PurchaseOutcome outcome) {

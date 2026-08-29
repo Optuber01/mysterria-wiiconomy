@@ -6,11 +6,13 @@ import dev.ua.ikeepcalm.wiic.domain.agora.db.StashDao;
 import dev.ua.ikeepcalm.wiic.domain.agora.db.TransactionDao;
 import dev.ua.ikeepcalm.wiic.domain.agora.ledger.model.StashItem;
 import dev.ua.ikeepcalm.wiic.utils.TransactionLogger;
+import dev.ua.ikeepcalm.wiic.utils.MysterriaAuditBridge;
 import org.bukkit.entity.Player;
 import org.bukkit.inventory.ItemStack;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
@@ -49,12 +51,20 @@ public class StashService {
     public void deposit(UUID owner, ItemStack item, String source, String ref, Consumer<Boolean> callback) {
         StashItem row = new StashItem(UUID.randomUUID(), owner, item.serializeAsBytes(),
                 item.getType(), item.getAmount(), null, source, ref, System.currentTimeMillis());
+        MysterriaAuditBridge.AuditIdentity identity = MysterriaAuditBridge.identity("stash-item", row.id());
         db.transactionThenMain(conn -> {
             StashDao.insert(conn, row);
             return true;
-        }, callback, error -> {
+        }, stored -> {
+            if (stored) MysterriaAuditBridge.emit("stash.deposited", true, owner, owner, row.id(), identity,
+                    source, MysterriaAuditBridge.metadata(Map.of("source", source,
+                                    "reference", ref == null ? "" : ref), MysterriaAuditBridge.itemMetadata(item)));
+            callback.accept(stored);
+        }, error -> {
             plugin.getLogger().severe("Failed to stash undeliverable " + item.getType()
                     + " x" + item.getAmount() + " for " + owner + ": " + error);
+            MysterriaAuditBridge.emit("stash.deposit_failed", false, owner, owner, row.id(), identity,
+                    source, MysterriaAuditBridge.itemMetadata(item));
             callback.accept(false);
         });
     }
@@ -73,6 +83,7 @@ public class StashService {
      */
     public void claim(Player owner, List<UUID> ids, BiConsumer<Integer, Integer> callback) {
         UUID uuid = owner.getUniqueId();
+        MysterriaAuditBridge.AuditIdentity identity = MysterriaAuditBridge.randomIdentity("stash-claim");
         if (!IN_FLIGHT.add(uuid)) {
             callback.accept(0, -1);
             return;
@@ -147,15 +158,21 @@ public class StashService {
             db.submitThenMain(conn -> StashDao.countUnclaimed(conn, uuid),
                     remaining -> {
                         IN_FLIGHT.remove(uuid);
+                        MysterriaAuditBridge.emit("stash.claimed", finalDelivered > 0, uuid, uuid, null, identity,
+                                "stash claim", Map.of("delivered", finalDelivered, "remaining", remaining));
                         callback.accept(finalDelivered, remaining);
                     },
                     error -> {
                         IN_FLIGHT.remove(uuid);
+                        MysterriaAuditBridge.emit("stash.claimed", finalDelivered > 0, uuid, uuid, null, identity,
+                                "stash claim count failed", Map.of("delivered", finalDelivered, "remaining", -1));
                         callback.accept(finalDelivered, -1);
                     });
         }, error -> {
             IN_FLIGHT.remove(uuid);
             plugin.getLogger().severe("Stash claim failed for " + owner.getName() + ": " + error);
+            MysterriaAuditBridge.emit("stash.claimed", false, uuid, uuid, null, identity,
+                    "stash claim failed", Map.of());
             callback.accept(0, -1);
         });
     }

@@ -17,11 +17,14 @@ import dev.ua.ikeepcalm.wiic.domain.agora.ledger.model.StashItem;
 import dev.ua.ikeepcalm.wiic.domain.agora.utils.SaleNotifier;
 import dev.ua.ikeepcalm.wiic.utils.TransactionLogger;
 import dev.ua.ikeepcalm.wiic.utils.VaultUtil;
+import dev.ua.ikeepcalm.wiic.utils.MysterriaAuditBridge;
 import org.bukkit.Bukkit;
 import org.bukkit.entity.Player;
 import org.jetbrains.annotations.Nullable;
 
 import java.util.Set;
+import java.util.Map;
+import java.math.BigDecimal;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.function.Consumer;
@@ -85,7 +88,12 @@ public class MarketPurchaseService {
      */
     public void purchase(Player buyer, UUID listingId, long quotedPrice, Consumer<Outcome> callback) {
         UUID uuid = buyer.getUniqueId();
+        String attemptId = UUID.randomUUID().toString();
+        MysterriaAuditBridge.AuditIdentity identity = MysterriaAuditBridge.identity("agora-purchase", attemptId);
         if (!IN_FLIGHT.add(uuid)) {
+            MysterriaAuditBridge.emit("agora.purchase.failed", false, uuid, null, listingId, identity,
+                    "already in progress", MysterriaAuditBridge.moneyMetadata(0,
+                            Map.of("listing_id", listingId.toString(), "quoted_price", quotedPrice)));
             callback.accept(Outcome.of(Result.ALREADY_IN_PROGRESS));
             return;
         }
@@ -94,7 +102,6 @@ public class MarketPurchaseService {
         // Identifies this attempt. A listing can be attempted more than once over its life
         // (a reservation the sweeper released, then a real sale by someone else), so keying
         // the journal on the listing would let one attempt erase the other's proof of payment.
-        String attemptId = UUID.randomUUID().toString();
         db.transactionThenMain(conn -> {
             if (ListingDao.reserve(conn, listingId, uuid, quotedPrice, now)) {
                 return ListingDao.findById(conn, listingId);
@@ -106,18 +113,26 @@ public class MarketPurchaseService {
             throw new PurchaseAbort(Result.PRICE_CHANGED);
         }, listing -> {
             if (listing == null) {
+                MysterriaAuditBridge.emit("agora.purchase.failed", false, uuid, null, listingId, identity,
+                        "listing unavailable", MysterriaAuditBridge.moneyMetadata(0,
+                                Map.of("listing_id", listingId.toString(), "quoted_price", quotedPrice)));
                 finish(uuid, callback, Outcome.of(Result.NO_LONGER_AVAILABLE));
                 return;
             }
-            withdrawAndCommit(buyer, uuid, listing, attemptId, callback);
+            withdrawAndCommit(buyer, uuid, listing, attemptId, identity, callback);
         }, error -> {
             Result result = error instanceof PurchaseAbort abort ? abort.result : Result.ERROR;
             if (result == Result.ERROR) plugin.getLogger().severe("Market reserve failed: " + error);
+            MysterriaAuditBridge.emit("agora.purchase.failed", false, uuid, null, listingId, identity,
+                    result.name().toLowerCase(), MysterriaAuditBridge.moneyMetadata(0,
+                            Map.of("listing_id", listingId.toString(), "quoted_price", quotedPrice)));
             finish(uuid, callback, Outcome.of(result));
         });
     }
 
-    private void withdrawAndCommit(Player buyer, UUID uuid, Listing listing, String attemptId, Consumer<Outcome> callback) {
+    private void withdrawAndCommit(Player buyer, UUID uuid, Listing listing, String attemptId,
+                                   MysterriaAuditBridge.AuditIdentity identity,
+                                   Consumer<Outcome> callback) {
         long price = listing.price();
 
         // Intent goes to disk before the money moves. If the server dies in the window
@@ -128,18 +143,28 @@ public class MarketPurchaseService {
             journal.append(MarketJournal.Type.BUY, attemptId, uuid, price, null, listing.id().toString());
         } catch (IllegalStateException e) {
             plugin.getLogger().severe("Market journal unavailable, refusing purchase: " + e.getMessage());
+            MysterriaAuditBridge.emit("agora.purchase.failed", false, uuid, listing.sellerUuid(), listing.id(), identity,
+                    "purchase journal unavailable", MysterriaAuditBridge.moneyMetadata(0,
+                            MysterriaAuditBridge.metadata(Map.of("listing_id", listing.id().toString()),
+                                    MysterriaAuditBridge.itemMetadata(listing.itemBytes()))));
             releaseThen(listing, uuid, () -> finish(uuid, callback, Outcome.of(Result.ERROR)));
             return;
         }
 
         Bukkit.getScheduler().runTaskAsynchronously(plugin, () -> {
+            BigDecimal balanceBefore = balance(uuid);
             boolean withdrawn = VaultUtil.withdraw(uuid, price);
             if (!withdrawn) {
                 TransactionLogger.logNote(buyer, "MARKET BUY withdraw of " + price + " coppets failed for listing " + listing.id());
+                MysterriaAuditBridge.emit("agora.purchase.failed", false, uuid, listing.sellerUuid(), listing.id(), identity,
+                        "insufficient funds", MysterriaAuditBridge.moneyMetadata(0, balanceBefore, balance(uuid),
+                                MysterriaAuditBridge.metadata(Map.of("listing_id", listing.id().toString()),
+                                        MysterriaAuditBridge.itemMetadata(listing.itemBytes()))));
                 journal.remove(attemptId);
                 releaseThen(listing, uuid, () -> finish(uuid, callback, Outcome.of(Result.INSUFFICIENT_FUNDS)));
                 return;
             }
+            BigDecimal balanceAfterCharge = balance(uuid);
 
             // Proof the money moved. Recovery refuses to hand over goods without it, so a
             // marker that cannot be written has to unwind the purchase here and now —
@@ -149,7 +174,12 @@ public class MarketPurchaseService {
                 journal.append(MarketJournal.Type.BUY_PAID, attemptId, uuid, price, null, listing.id().toString());
             } catch (IllegalStateException e) {
                 plugin.getLogger().severe("Market journal marker write failed after withdraw, refunding: " + e.getMessage());
-                refund(buyer, uuid, price, "journal marker failed");
+                MysterriaAuditBridge.emit("agora.purchase.failed", false, uuid, listing.sellerUuid(), listing.id(), identity,
+                        "payment proof write failed", MysterriaAuditBridge.moneyMetadata(-price,
+                                balanceBefore, balanceAfterCharge, MysterriaAuditBridge.metadata(
+                                        Map.of("listing_id", listing.id().toString()),
+                                        MysterriaAuditBridge.itemMetadata(listing.itemBytes()))));
+                refund(buyer, uuid, price, "journal marker failed", identity);
                 // The intent entry has to go with it. Left behind, startup recovery would
                 // read it as an unproven purchase and tell staff to check whether the buyer
                 // was ever refunded — which they just were, right here.
@@ -162,7 +192,7 @@ public class MarketPurchaseService {
                 return;
             }
 
-            commitSale(buyer, uuid, listing, attemptId, callback);
+            commitSale(buyer, uuid, listing, attemptId, identity, balanceBefore, balanceAfterCharge, callback);
         });
     }
 
@@ -178,7 +208,10 @@ public class MarketPurchaseService {
         });
     }
 
-    private void commitSale(Player buyer, UUID uuid, Listing listing, String attemptId, Consumer<Outcome> callback) {
+    private void commitSale(Player buyer, UUID uuid, Listing listing, String attemptId,
+                            MysterriaAuditBridge.AuditIdentity identity, BigDecimal balanceBefore,
+                            BigDecimal balanceAfterCharge,
+                            Consumer<Outcome> callback) {
         long price = listing.price();
         long tax = config.saleTax(price);
         long net = price - tax;
@@ -202,6 +235,11 @@ public class MarketPurchaseService {
             journal.remove(attemptId);
             TransactionLogger.logNote(buyer, "MARKET BUY " + listing.material().name() + " x" + listing.amount()
                     + " for " + price + " coppets from " + listing.sellerName() + " (listing " + listing.id() + ")");
+            MysterriaAuditBridge.emit("agora.purchase.completed", true, uuid, listing.sellerUuid(), listing.id(), identity,
+                    "listing purchase committed", MysterriaAuditBridge.moneyMetadata(-price,
+                            balanceBefore, balanceAfterCharge, MysterriaAuditBridge.metadata(
+                                    Map.of("listing_id", listing.id().toString(), "tax", tax, "net", net),
+                                    MysterriaAuditBridge.itemMetadata(listing.itemBytes()))));
             Player seller = Bukkit.getPlayer(listing.sellerUuid());
             if (seller != null) {
                 TransactionLogger.logNote(seller, "MARKET SOLD " + listing.material().name() + " x" + listing.amount()
@@ -213,7 +251,7 @@ public class MarketPurchaseService {
             // The sale is already final; courier delivery only decides where the goods wait.
             if (courier != null && courier.hasContract(uuid)) {
                 courier.tryDeliver(buyer, stashId, listing.itemBytes(), listing.sellerUuid(), listing.sellerName(),
-                        couriered -> finish(uuid, callback, new Outcome(Result.SUCCESS, price, couriered)));
+                        identity, couriered -> finish(uuid, callback, new Outcome(Result.SUCCESS, price, couriered)));
             } else {
                 finish(uuid, callback, new Outcome(Result.SUCCESS, price, false));
             }
@@ -222,7 +260,12 @@ public class MarketPurchaseService {
             // disk so startup recovery can finish the sale if this was a crash; for a
             // plain SQL failure we refund immediately and release the reservation.
             plugin.getLogger().severe("Market sale commit failed for listing " + listing.id() + ": " + error);
-            refund(buyer, uuid, price, "sale commit failed");
+            MysterriaAuditBridge.emit("agora.purchase.failed", false, uuid, listing.sellerUuid(), listing.id(), identity,
+                    "sale commit failed", MysterriaAuditBridge.moneyMetadata(-price,
+                            balanceBefore, balanceAfterCharge, MysterriaAuditBridge.metadata(
+                                    Map.of("listing_id", listing.id().toString()),
+                                    MysterriaAuditBridge.itemMetadata(listing.itemBytes()))));
+            refund(buyer, uuid, price, "sale commit failed", identity);
             releaseThen(listing, uuid, () -> {
                 journal.remove(attemptId);
                 finish(uuid, callback, Outcome.of(Result.ERROR));
@@ -230,13 +273,24 @@ public class MarketPurchaseService {
         });
     }
 
-    private void refund(Player buyer, UUID uuid, long amount, String reason) {
+    private void refund(Player buyer, UUID uuid, long amount, String reason,
+                        MysterriaAuditBridge.AuditIdentity identity) {
         Bukkit.getScheduler().runTaskAsynchronously(plugin, () -> {
+            BigDecimal balanceBefore = balance(uuid);
             boolean refunded = VaultUtil.deposit(uuid, amount);
+            MysterriaAuditBridge.emit("agora.purchase.refunded", refunded, uuid, uuid, null, identity,
+                    reason, MysterriaAuditBridge.moneyMetadata(refunded ? amount : 0,
+                            balanceBefore, balance(uuid), Map.of()));
             TransactionLogger.logNote(buyer, "MARKET BUY refund of " + amount + " coppets (" + reason + ") "
                     + (refunded ? "OK" : "FAILED"));
             if (!refunded) plugin.getLogger().severe("Failed to refund " + amount + " coppets to " + uuid);
         });
+    }
+
+    private static BigDecimal balance(UUID uuid) {
+        if (WIIC.getEcon() == null) return BigDecimal.ZERO;
+        BigDecimal balance = WIIC.getEcon().balance("iConomyUnlocked", uuid);
+        return balance != null ? balance : BigDecimal.ZERO;
     }
 
     private void finish(UUID uuid, Consumer<Outcome> callback, Outcome outcome) {

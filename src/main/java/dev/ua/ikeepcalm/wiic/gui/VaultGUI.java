@@ -273,8 +273,10 @@ public class VaultGUI {
         TransactionLogger.logBalance(player, before, "before deposit");
         boolean success = VaultUtil.deposit(player.getUniqueId(), amount);
         TransactionLogger.logDeposit(player, item, amount, success);
-        MysterriaAuditBridge.emitWallet("deposited", player, item, amount, success);
-        TransactionLogger.logBalance(player, currentBalance(player), "after deposit");
+        BigDecimal after = currentBalance(player);
+        MysterriaAuditBridge.emitWallet("deposited", player, item, amount, success, before, after,
+                MysterriaAuditBridge.randomIdentity("wallet-deposit"));
+        TransactionLogger.logBalance(player, after, "after deposit");
         if (!success) {
             Bukkit.getScheduler().runTask(WIIC.INSTANCE, () -> {
                 if (ItemUtil.giveOrDrop(player, item)) {
@@ -306,8 +308,10 @@ public class VaultGUI {
         TransactionLogger.logBalance(player, before, "before withdraw");
         boolean success = VaultUtil.withdraw(player.getUniqueId(), amount);
         TransactionLogger.logWithdraw(player, item, amount, success);
-        MysterriaAuditBridge.emitWallet("withdrawn", player, item, amount, success);
-        TransactionLogger.logBalance(player, currentBalance(player), "after withdraw");
+        BigDecimal after = currentBalance(player);
+        MysterriaAuditBridge.emitWallet("withdrawn", player, item, amount, success, before, after,
+                MysterriaAuditBridge.randomIdentity("wallet-withdrawal"));
+        TransactionLogger.logBalance(player, after, "after withdraw");
         if (!success) {
             Bukkit.getScheduler().runTask(WIIC.INSTANCE, () ->
                     player.sendMessage(MM.deserialize("<red>Withdrawal failed — please contact an administrator.")));
@@ -322,8 +326,10 @@ public class VaultGUI {
         TransactionLogger.logBalance(player, before, "before sell");
         boolean success = VaultUtil.deposit(player.getUniqueId(), value);
         TransactionLogger.logSell(player, item, value, success);
-        MysterriaAuditBridge.emitWallet("sold", player, item, value, success);
-        TransactionLogger.logBalance(player, currentBalance(player), "after sell");
+        BigDecimal after = currentBalance(player);
+        MysterriaAuditBridge.emitWallet("sold", player, item, value, success, before, after,
+                MysterriaAuditBridge.randomIdentity("wallet-sale"));
+        TransactionLogger.logBalance(player, after, "after sell");
         if (!success) {
             Bukkit.getScheduler().runTask(WIIC.INSTANCE, () -> {
                 if (ItemUtil.giveOrDrop(player, item)) {
