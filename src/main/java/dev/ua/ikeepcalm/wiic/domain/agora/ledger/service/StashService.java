@@ -49,22 +49,23 @@ public class StashService {
      * failure to reach them never becomes a failure to keep them.
      */
     public void deposit(UUID owner, ItemStack item, String source, String ref, Consumer<Boolean> callback) {
+        String safeSource = source == null ? "unknown" : source;
         StashItem row = new StashItem(UUID.randomUUID(), owner, item.serializeAsBytes(),
-                item.getType(), item.getAmount(), null, source, ref, System.currentTimeMillis());
+                item.getType(), item.getAmount(), null, safeSource, ref, System.currentTimeMillis());
         MysterriaAuditBridge.AuditIdentity identity = MysterriaAuditBridge.identity("stash-item", row.id());
         db.transactionThenMain(conn -> {
             StashDao.insert(conn, row);
             return true;
         }, stored -> {
             if (stored) MysterriaAuditBridge.emit("stash.deposited", true, owner, owner, row.id(), identity,
-                    source, MysterriaAuditBridge.metadata(Map.of("source", source,
+                    safeSource, MysterriaAuditBridge.metadata(Map.of("source", safeSource,
                                     "reference", ref == null ? "" : ref), MysterriaAuditBridge.itemMetadata(item)));
             callback.accept(stored);
         }, error -> {
             plugin.getLogger().severe("Failed to stash undeliverable " + item.getType()
                     + " x" + item.getAmount() + " for " + owner + ": " + error);
             MysterriaAuditBridge.emit("stash.deposit_failed", false, owner, owner, row.id(), identity,
-                    source, MysterriaAuditBridge.itemMetadata(item));
+                    safeSource, MysterriaAuditBridge.itemMetadata(item));
             callback.accept(false);
         });
     }
@@ -83,8 +84,19 @@ public class StashService {
      */
     public void claim(Player owner, List<UUID> ids, BiConsumer<Integer, Integer> callback) {
         UUID uuid = owner.getUniqueId();
+        List<UUID> requestedIds = ids == null ? List.of() : ids.stream()
+                .filter(java.util.Objects::nonNull)
+                .limit(BATCH_LIMIT)
+                .toList();
+        List<String> requestedIdValues = requestedIds.stream()
+                .filter(java.util.Objects::nonNull)
+                .map(UUID::toString)
+                .toList();
         MysterriaAuditBridge.AuditIdentity identity = MysterriaAuditBridge.randomIdentity("stash-claim");
         if (!IN_FLIGHT.add(uuid)) {
+            MysterriaAuditBridge.emit("stash.claimed", false, uuid, uuid, null, identity,
+                    "stash claim already in progress", Map.of("delivered", 0,
+                            "remaining", -1, "requested_ids", requestedIdValues));
             callback.accept(0, -1);
             return;
         }
@@ -95,7 +107,7 @@ public class StashService {
             callback.accept(0, -1);
             return;
         }
-        int budget = Math.min(freeSlots, ids.size());
+        int budget = Math.min(freeSlots, requestedIds.size());
 
         db.transactionThenMain(conn -> {
             List<StashItem> claimed = new ArrayList<>();
@@ -103,7 +115,7 @@ public class StashService {
             List<StashItem> rows = StashDao.unclaimedByOwner(conn, uuid, BATCH_LIMIT);
             for (StashItem row : rows) {
                 if (claimed.size() >= budget) break;
-                if (!ids.contains(row.id())) continue;
+                if (!requestedIds.contains(row.id())) continue;
                 if (StashDao.markClaimed(conn, row.id(), now)) {
                     claimed.add(row);
                     TransactionDao.log(conn, "CLAIM_STASH", uuid, null, null, 0,
@@ -155,17 +167,20 @@ public class StashService {
                 });
             }
             int finalDelivered = delivered;
+            List<String> claimedIds = claimed.stream().map(row -> row.id().toString()).toList();
             db.submitThenMain(conn -> StashDao.countUnclaimed(conn, uuid),
                     remaining -> {
                         IN_FLIGHT.remove(uuid);
                         MysterriaAuditBridge.emit("stash.claimed", finalDelivered > 0, uuid, uuid, null, identity,
-                                "stash claim", Map.of("delivered", finalDelivered, "remaining", remaining));
+                                "stash claim", Map.of("delivered", finalDelivered, "remaining", remaining,
+                                        "claimed_ids", claimedIds));
                         callback.accept(finalDelivered, remaining);
                     },
                     error -> {
                         IN_FLIGHT.remove(uuid);
                         MysterriaAuditBridge.emit("stash.claimed", finalDelivered > 0, uuid, uuid, null, identity,
-                                "stash claim count failed", Map.of("delivered", finalDelivered, "remaining", -1));
+                                "stash claim count failed", Map.of("delivered", finalDelivered, "remaining", -1,
+                                        "claimed_ids", claimedIds));
                         callback.accept(finalDelivered, -1);
                     });
         }, error -> {

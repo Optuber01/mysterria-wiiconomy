@@ -338,9 +338,7 @@ public class CourierService {
     }
 
     private static BigDecimal balance(UUID uuid) {
-        if (WIIC.getEcon() == null) return BigDecimal.ZERO;
-        BigDecimal balance = WIIC.getEcon().balance("iConomyUnlocked", uuid);
-        return balance != null ? balance : BigDecimal.ZERO;
+        return VaultUtil.balance(uuid);
     }
 
     /**

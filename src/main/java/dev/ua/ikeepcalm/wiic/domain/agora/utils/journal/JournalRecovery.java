@@ -202,16 +202,16 @@ public class JournalRecovery {
         return () -> {
             BigDecimal balanceBefore = balance(buyer);
             boolean refunded = VaultUtil.deposit(buyer, amount);
-            MysterriaAuditBridge.emit("agora.purchase.recovery_refunded", refunded,
-                    buyer, buyer, listingId, identity, "interrupted purchase refunded by recovery",
-                    MysterriaAuditBridge.moneyMetadata(refunded ? amount : 0,
-                            balanceBefore, balance(buyer), Map.of("listing_id", listingId.toString())));
             if (!refunded) {
                 plugin.getLogger().severe("Recovery refund of " + amount + " coppets to "
                         + buyer + " FAILED — manual repair needed");
             } else {
                 plugin.getLogger().warning("Recovery refunded " + amount + " coppets to " + buyer);
             }
+            MysterriaAuditBridge.emit("agora.purchase.recovery_refunded", refunded,
+                    buyer, buyer, listingId, identity, "interrupted purchase refunded by recovery",
+                    MysterriaAuditBridge.moneyMetadata(refunded ? amount : 0,
+                            balanceBefore, balance(buyer), Map.of("listing_id", listingId.toString())));
         };
     }
 
@@ -227,19 +227,18 @@ public class JournalRecovery {
             plugin.getLogger().warning("Recovered deposited ledger claim of " + entry.amount() + " for " + owner);
             return () -> MysterriaAuditBridge.emit("ledger.claim_recovered", true,
                     owner, owner, null, identity, "deposited claim finalized by recovery",
-                    MysterriaAuditBridge.moneyMetadata(entry.amount(), Map.of()));
+                    MysterriaAuditBridge.moneyMetadata(entry.amount(),
+                            Map.of("claim_id", entry.id())));
         } else {
             LedgerDao.revertClaim(conn, owner);
             plugin.getLogger().warning("Reverted unproven ledger claim of " + entry.amount() + " for " + owner);
             return () -> MysterriaAuditBridge.emit("ledger.claim_reverted", false,
                     owner, owner, null, identity, "unproven claim reverted by recovery",
-                    MysterriaAuditBridge.moneyMetadata(0, Map.of()));
+                    MysterriaAuditBridge.moneyMetadata(0, Map.of("claim_id", entry.id())));
         }
     }
 
     private static BigDecimal balance(UUID uuid) {
-        if (WIIC.getEcon() == null) return BigDecimal.ZERO;
-        BigDecimal balance = WIIC.getEcon().balance("iConomyUnlocked", uuid);
-        return balance != null ? balance : BigDecimal.ZERO;
+        return VaultUtil.balance(uuid);
     }
 }

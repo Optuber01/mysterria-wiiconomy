@@ -347,8 +347,7 @@ public class VaultGUI {
     }
 
     private static BigDecimal currentBalance(Player player) {
-        if (WIIC.getEcon() == null) return BigDecimal.ZERO;
-        BigDecimal balance = WIIC.getEcon().balance("iConomyUnlocked", player.getUniqueId());
+        BigDecimal balance = VaultUtil.balance(player.getUniqueId());
         return balance != null ? balance : BigDecimal.ZERO;
     }
 }

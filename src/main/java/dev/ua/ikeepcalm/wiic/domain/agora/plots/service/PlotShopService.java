@@ -90,6 +90,7 @@ public class PlotShopService {
 
     private static final Set<UUID> BUYERS_IN_FLIGHT = ConcurrentHashMap.newKeySet();
     private static final Set<UUID> SHOPS_IN_FLIGHT = ConcurrentHashMap.newKeySet();
+    private static final long REJECTION_AUDIT_INTERVAL_MS = 1_000L;
 
     private final WIIC plugin;
     private final MarketConfig config;
@@ -108,8 +109,12 @@ public class PlotShopService {
      * Buyer → the counter they have armed, so a stray click can't spend their coins.
      */
     private final Map<UUID, Armed> armed = new ConcurrentHashMap<>();
+    private final Map<RejectionKey, Long> lastRejectionAuditAt = new ConcurrentHashMap<>();
 
     private record Armed(UUID shopId, long price, long expiresAt) {
+    }
+
+    private record RejectionKey(UUID buyerId, UUID shopId, String reason) {
     }
 
     public PlotShopService(WIIC plugin, MarketConfig config, MarketDatabase db, PlotService plots,
@@ -434,13 +439,11 @@ public class PlotShopService {
             return;
         }
         if (!BUYERS_IN_FLIGHT.add(buyerId)) {
-            emitPurchaseRejected(buyerId, shop, identity, "buyer busy");
             callback.accept(Purchase.of(BuyResult.BUSY));
             return;
         }
         if (!SHOPS_IN_FLIGHT.add(shop.id())) {
             BUYERS_IN_FLIGHT.remove(buyerId);
-            emitPurchaseRejected(buyerId, shop, identity, "shop busy");
             callback.accept(Purchase.of(BuyResult.BUSY));
             return;
         }
@@ -466,10 +469,11 @@ public class PlotShopService {
                 // one outcome worse than refusing the sale.
                 Inventory live = containerOf(shop);
                 if (live == null || !takeStock(live, template, wanted)) {
-                    refund(buyer, buyerId, price, "stock gone before the counter could hand it over", identity);
                     MysterriaAuditBridge.emit("plot_shop.purchase_failed", false, buyerId, shop.ownerUuid(), shop.id(), identity,
                             "stock unavailable", MysterriaAuditBridge.moneyMetadata(-price,
                                     balanceBefore, balanceAfterCharge, Map.of("plot_id", shop.plotId())));
+                    refund(buyer, buyerId, shop.id(), shop.plotId(), price,
+                            "stock gone before the counter could hand it over", identity);
                     finish(buyerId, shop.id(), callback, Purchase.of(BuyResult.OUT_OF_STOCK));
                     return;
                 }
@@ -617,35 +621,51 @@ public class PlotShopService {
     // Plumbing
     // -------------------------------------------------------------------------
 
-    private void refund(Player buyer, UUID buyerId, long amount, String reason,
+    private void refund(Player buyer, UUID buyerId, UUID shopId, String plotId, long amount, String reason,
                         MysterriaAuditBridge.AuditIdentity identity) {
         Bukkit.getScheduler().runTaskAsynchronously(plugin, () -> {
             BigDecimal balanceBefore = balance(buyerId);
             boolean refunded = VaultUtil.deposit(buyerId, amount);
-            MysterriaAuditBridge.emit("plot_shop.refunded", refunded, buyerId, buyerId, null, identity,
-                    reason, MysterriaAuditBridge.moneyMetadata(refunded ? amount : 0,
-                            balanceBefore, balance(buyerId), Map.of()));
             TransactionLogger.logNote(buyer, "MARKET STALL refund of " + amount + " coppets ("
                     + reason + ") " + (refunded ? "OK" : "FAILED"));
             if (!refunded) {
                 plugin.getLogger().severe("Failed to refund " + amount + " coppets to " + buyerId);
             }
+            MysterriaAuditBridge.emit("plot_shop.refunded", refunded, buyerId, buyerId, shopId, identity,
+                    reason, MysterriaAuditBridge.moneyMetadata(refunded ? amount : 0,
+                            balanceBefore, balance(buyerId), Map.of("plot_id", plotId,
+                                    "shop_id", shopId.toString())));
         });
     }
 
     private static BigDecimal balance(UUID uuid) {
-        if (WIIC.getEcon() == null) return BigDecimal.ZERO;
-        BigDecimal balance = WIIC.getEcon().balance("iConomyUnlocked", uuid);
-        return balance != null ? balance : BigDecimal.ZERO;
+        return VaultUtil.balance(uuid);
     }
 
-    private static void emitPurchaseRejected(UUID buyerId, PlotShop shop,
-                                             MysterriaAuditBridge.AuditIdentity identity,
-                                             String reason) {
+    private void emitPurchaseRejected(UUID buyerId, PlotShop shop,
+                                      MysterriaAuditBridge.AuditIdentity identity,
+                                      String reason) {
+        if (!shouldEmitRejection(buyerId, shop.id(), reason)) return;
         MysterriaAuditBridge.emit("plot_shop.purchase_failed", false, buyerId, shop.ownerUuid(),
                 shop.id(), identity, reason, MysterriaAuditBridge.moneyMetadata(0,
-                        MysterriaAuditBridge.metadata(Map.of("plot_id", shop.plotId()),
-                                MysterriaAuditBridge.itemMetadata(shop.itemBytes()))));
+                        Map.of("plot_id", shop.plotId())));
+    }
+
+    private boolean shouldEmitRejection(UUID buyerId, UUID shopId, String reason) {
+        long now = System.currentTimeMillis();
+        RejectionKey key = new RejectionKey(buyerId, shopId, reason);
+        boolean[] allowed = {false};
+        lastRejectionAuditAt.compute(key, (ignored, previous) -> {
+            if (previous == null || now - previous >= REJECTION_AUDIT_INTERVAL_MS) {
+                allowed[0] = true;
+                return now;
+            }
+            return previous;
+        });
+        if (lastRejectionAuditAt.size() > 4096) {
+            lastRejectionAuditAt.entrySet().removeIf(entry -> now - entry.getValue() >= REJECTION_AUDIT_INTERVAL_MS);
+        }
+        return allowed[0];
     }
 
     private void finish(UUID buyerId, UUID shopId, Consumer<Purchase> callback, Purchase outcome) {

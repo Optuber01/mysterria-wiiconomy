@@ -101,7 +101,8 @@ dependencies {
         compileOnly 'dev.djecka2k19:undeadpostmans-api:1.0.0-SNAPSHOT'
     }
     compileOnly 'net.thenextlvl:worlds:4.2.2'
-    def coiApiJar = project.findProperty('coiApiJar')
+    // A local API jar is useful for clean-room CI and mirrors the optional Undead API override.
+    def coiApiJar = project.findProperty('coiApiJar') ?: System.getenv('COI_API_JAR')
     if (coiApiJar) {
         compileOnly files(coiApiJar)
     } else {

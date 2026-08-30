@@ -115,6 +115,7 @@ public class ListingService {
 
         long fee = config.listingFee(price);
         ItemSnapshot snapshot = inspector.snapshot(item);
+        Map<String, Object> itemAuditMetadata = Map.copyOf(MysterriaAuditBridge.itemMetadata(item));
         byte[] bytes = item.serializeAsBytes();
         long now = System.currentTimeMillis();
         Listing listing = new Listing(listingId, uuid, seller.getName(), bytes,
@@ -146,7 +147,8 @@ public class ListingService {
                 finish(uuid, callback, Outcome.failed(preflight, 0, journal.remove(listingId.toString())));
                 return;
             }
-            chargeAndInsert(seller, uuid, listing, listingId, identity, snapshot, item, price, fee, callback);
+            chargeAndInsert(seller, uuid, listing, listingId, identity, snapshot, itemAuditMetadata,
+                    price, fee, callback);
         }, error -> {
             plugin.getLogger().severe("Market listing preflight failed for " + seller.getName() + ": " + error);
             emitRejected(uuid, listingId, identity, item, price, "listing preflight failed");
@@ -156,7 +158,8 @@ public class ListingService {
 
     private void chargeAndInsert(Player seller, UUID uuid, Listing listing, UUID listingId,
                                  MysterriaAuditBridge.AuditIdentity identity,
-                                 ItemSnapshot snapshot, ItemStack item, long price, long fee,
+                                 ItemSnapshot snapshot, Map<String, Object> itemAuditMetadata,
+                                 long price, long fee,
                                  Consumer<Outcome> callback) {
         // Fee is a sink (never deposited anywhere), see market.yml.
         Bukkit.getScheduler().runTaskAsynchronously(plugin, () -> {
@@ -166,7 +169,7 @@ public class ListingService {
                 MysterriaAuditBridge.emit("agora.listing.failed", false, uuid, uuid, listingId, identity,
                         "listing fee withdrawal failed", MysterriaAuditBridge.moneyMetadata(0,
                                 balanceBefore, balance(uuid), MysterriaAuditBridge.metadata(
-                                        Map.of("price", price, "fee", fee), MysterriaAuditBridge.itemMetadata(item))));
+                                        Map.of("price", price, "fee", fee), itemAuditMetadata)));
                 boolean pruned = journal.remove(listingId.toString());
                 Bukkit.getScheduler().runTask(plugin, () ->
                         finish(uuid, callback, Outcome.failed(Result.INSUFFICIENT_FEE, fee, pruned)));
@@ -194,11 +197,11 @@ public class ListingService {
                                 balanceBefore, balanceAfterCharge, MysterriaAuditBridge.metadata(
                                         Map.of("price", price, "fee", fee, "plot_id",
                                                 listing.plotId() == null ? "" : listing.plotId()),
-                                        MysterriaAuditBridge.itemMetadata(item))));
+                                        itemAuditMetadata)));
                 finish(uuid, callback, new Outcome(Result.SUCCESS, null, fee, false));
             }, error -> {
                 boolean pruned = journal.remove(listingId.toString());
-                refundFee(seller, uuid, fee, "listing insert failed", identity);
+                refundFee(seller, uuid, listingId, fee, "listing insert failed", identity);
                 Result result = error instanceof ListingLimitException limit ? limit.result : Result.ERROR;
                 if (result == Result.ERROR) {
                     plugin.getLogger().severe("Market listing insert failed for " + seller.getName() + ": " + error);
@@ -242,35 +245,35 @@ public class ListingService {
         });
     }
 
-    private void refundFee(Player seller, UUID uuid, long fee, String reason,
+    private void refundFee(Player seller, UUID uuid, UUID listingId, long fee, String reason,
                            MysterriaAuditBridge.AuditIdentity identity) {
         if (fee <= 0) return;
         Bukkit.getScheduler().runTaskAsynchronously(plugin, () -> {
             BigDecimal balanceBefore = balance(uuid);
             boolean refunded = VaultUtil.deposit(uuid, fee);
-            MysterriaAuditBridge.emit("agora.listing.fee_refunded", refunded, uuid, uuid, null, identity,
-                    reason, MysterriaAuditBridge.moneyMetadata(refunded ? fee : 0,
-                            balanceBefore, balance(uuid), Map.of("fee", fee)));
             TransactionLogger.logNote(seller, "MARKET LIST fee refund of " + fee + " coppets ("
                     + reason + ") " + (refunded ? "OK" : "FAILED"));
             if (!refunded) {
                 plugin.getLogger().severe("Failed to refund listing fee of " + fee + " coppets to " + uuid);
             }
+            MysterriaAuditBridge.emit("agora.listing.fee_refunded", refunded, uuid, uuid, listingId, identity,
+                    reason, MysterriaAuditBridge.moneyMetadata(refunded ? fee : 0,
+                            balanceBefore, balance(uuid), Map.of("fee", fee,
+                                    "listing_id", listingId.toString())));
         });
     }
 
     private static BigDecimal balance(UUID uuid) {
-        if (WIIC.getEcon() == null) return BigDecimal.ZERO;
-        BigDecimal balance = WIIC.getEcon().balance("iConomyUnlocked", uuid);
-        return balance != null ? balance : BigDecimal.ZERO;
+        return VaultUtil.balance(uuid);
     }
 
     private static void emitRejected(UUID sellerId, UUID listingId,
                                      MysterriaAuditBridge.AuditIdentity identity,
                                      ItemStack item, long price, String reason) {
-        MysterriaAuditBridge.emit("agora.listing.failed", false, sellerId, sellerId, listingId, identity,
+        MysterriaAuditBridge.emit("agora.listing.failed", false, sellerId, sellerId, null, identity,
                 reason, MysterriaAuditBridge.moneyMetadata(0,
-                        MysterriaAuditBridge.metadata(Map.of("price", price),
+                        MysterriaAuditBridge.metadata(Map.of("price", price,
+                                        "listing_request_id", listingId.toString()),
                                 MysterriaAuditBridge.itemMetadata(item))));
     }
 

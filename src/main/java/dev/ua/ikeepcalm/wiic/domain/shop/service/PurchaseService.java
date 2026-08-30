@@ -54,6 +54,7 @@ public class PurchaseService {
     // and delayed/replayed packets — a second purchase attempt for the same player
     // cannot enter the pipeline while one is already in flight, regardless of timing.
     private static final Set<UUID> IN_FLIGHT = ConcurrentHashMap.newKeySet();
+    private static final long REJECTION_AUDIT_INTERVAL_MS = 1_000L;
 
     private final WIIC plugin;
     private final ShopConfig shopConfig;
@@ -61,6 +62,10 @@ public class PurchaseService {
     private final ShopPricing pricing;
     private final MarketIndex marketIndex;
     private final Map<UUID, Long> lastPurchaseAt = new ConcurrentHashMap<>();
+    private final Map<RejectionKey, Long> lastRejectionAuditAt = new ConcurrentHashMap<>();
+
+    private record RejectionKey(UUID playerId, Material material, String reason) {
+    }
 
     public PurchaseService(WIIC plugin, ShopConfig shopConfig, ShopCatalog catalog, ShopPricing pricing, MarketIndex marketIndex) {
         this.plugin = plugin;
@@ -82,40 +87,40 @@ public class PurchaseService {
         MysterriaAuditBridge.AuditIdentity identity = MysterriaAuditBridge.randomIdentity("shop-purchase");
 
         if (!IN_FLIGHT.add(uuid)) {
-            emit(player, material, amount, identity, false, "already in progress", 0, null, null);
+            emitRejected(player, material, amount, identity, "already in progress");
             callback.accept(new PurchaseOutcome(Result.ALREADY_IN_PROGRESS, 0, 0, 0, 0));
             return;
         }
 
         long last = lastPurchaseAt.getOrDefault(uuid, 0L);
         if (System.currentTimeMillis() - last < shopConfig.cooldownMs()) {
-            emit(player, material, amount, identity, false, "cooldown", 0, null, null);
+            emitRejected(player, material, amount, identity, "cooldown");
             finish(uuid, callback, new PurchaseOutcome(Result.COOLDOWN, 0, 0, 0, 0));
             return;
         }
 
         ShopEntry entry = catalog.get(material);
         if (entry == null) {
-            emit(player, material, amount, identity, false, "not purchasable", 0, null, null);
+            emitRejected(player, material, amount, identity, "not purchasable");
             finish(uuid, callback, new PurchaseOutcome(Result.NOT_PURCHASABLE, 0, 0, 0, 0));
             return;
         }
 
         if (amount < 1 || amount > shopConfig.maxPerPurchase()) {
-            emit(player, material, amount, identity, false, "invalid amount", 0, null, null);
+            emitRejected(player, material, amount, identity, "invalid amount");
             finish(uuid, callback, new PurchaseOutcome(Result.INVALID_AMOUNT, 0, 0, 0, 0));
             return;
         }
 
         long liveUnitPrice = pricing.unitPrice(material);
         if (liveUnitPrice < 0) {
-            emit(player, material, amount, identity, false, "not purchasable", 0, null, null);
+            emitRejected(player, material, amount, identity, "not purchasable");
             finish(uuid, callback, new PurchaseOutcome(Result.NOT_PURCHASABLE, 0, 0, 0, 0));
             return;
         }
         if (liveUnitPrice > quotedUnitPrice) {
             // Never charge more than what the player was shown; make them re-confirm instead.
-            emit(player, material, amount, identity, false, "price changed", 0, null, null);
+            emitRejected(player, material, amount, identity, "price changed");
             finish(uuid, callback, new PurchaseOutcome(Result.PRICE_CHANGED, liveUnitPrice, 0, 0, 0));
             return;
         }
@@ -138,7 +143,7 @@ public class PurchaseService {
             boolean withdrawn = VaultUtil.withdraw(uuid, total);
             if (!withdrawn) {
                 TransactionLogger.logPurchase(player, material, amount, total, indexAtPurchase, false);
-                emit(player, material, amount, identity, false, "withdraw failed", total, before, currentBalance(uuid));
+                emit(player, material, amount, identity, false, "withdraw failed", 0, before, currentBalance(uuid));
                 plugin.getLogger().warning("Shop withdraw of " + total + " coppets failed for " + player.getName() + " (" + uuid + ")");
                 Bukkit.getScheduler().runTask(plugin, () ->
                         finish(uuid, callback, new PurchaseOutcome(Result.WITHDRAW_FAILED, chargedUnitPrice, total, 0, 0)));
@@ -165,7 +170,7 @@ public class PurchaseService {
                                     + player.getName() + " (" + uuid + ") after aborted shop delivery!");
                         }
                     });
-                    emit(player, material, amount, identity, false, "delivery aborted: offline", total,
+                    emit(player, material, amount, identity, false, "delivery aborted: offline", -total,
                             before, balanceAfterCharge);
                     finish(uuid, callback, new PurchaseOutcome(Result.PLAYER_OFFLINE, chargedUnitPrice, total, 0, 0));
                     return;
@@ -178,7 +183,7 @@ public class PurchaseService {
                 try {
                     DeliveryResult delivery = deliver(online, material, amount);
                     TransactionLogger.logPurchase(online, material, amount, total, indexAtPurchase, true);
-                    emit(online, material, amount, identity, true, "purchase delivered", total,
+                    emit(online, material, amount, identity, true, "purchase delivered", -total,
                             before, balanceAfterCharge);
                     Bukkit.getScheduler().runTaskAsynchronously(plugin, () ->
                             TransactionLogger.logBalance(online, currentBalance(uuid), "after shop purchase"));
@@ -200,7 +205,7 @@ public class PurchaseService {
                                     + player.getName() + " (" + uuid + ") after failed shop delivery!");
                         }
                     });
-                    emit(player, material, amount, identity, false, "delivery failed", total,
+                    emit(player, material, amount, identity, false, "delivery failed", -total,
                             before, balanceAfterCharge);
                     finish(uuid, callback, new PurchaseOutcome(Result.WITHDRAW_FAILED, chargedUnitPrice, total, 0, 0));
                 }
@@ -210,13 +215,37 @@ public class PurchaseService {
 
     private static void emit(Player player, Material material, int itemAmount,
                              MysterriaAuditBridge.AuditIdentity identity,
-                             boolean success, String reason, long coppets,
+                             boolean success, String reason, long delta,
                              BigDecimal before, BigDecimal after) {
-        long delta = before != null && after != null && before.compareTo(after) > 0 ? -coppets : 0;
-        MysterriaAuditBridge.emit("shop.purchased", success, player.getUniqueId(),
-                player.getUniqueId(), null, identity, reason,
-                MysterriaAuditBridge.moneyMetadata(delta, before, after,
-                        Map.of("material", material.name().toLowerCase(), "item_amount", itemAmount)));
+        try {
+            if (player == null || material == null) return;
+            UUID playerId = player.getUniqueId();
+            MysterriaAuditBridge.emit("shop.purchased", success, playerId,
+                    playerId, null, identity, reason,
+                    MysterriaAuditBridge.moneyMetadata(delta, before, after,
+                            Map.of("material", material.name().toLowerCase(), "item_amount", itemAmount)));
+        } catch (RuntimeException | LinkageError ignored) {
+            // Audit is best effort and must never trigger a delivery refund or lock a buyer.
+        }
+    }
+
+    private void emitRejected(Player player, Material material, int itemAmount,
+                              MysterriaAuditBridge.AuditIdentity identity, String reason) {
+        UUID playerId = player.getUniqueId();
+        long now = System.currentTimeMillis();
+        RejectionKey key = new RejectionKey(playerId, material, reason);
+        boolean[] allowed = {false};
+        lastRejectionAuditAt.compute(key, (ignored, previous) -> {
+            if (previous == null || now - previous >= REJECTION_AUDIT_INTERVAL_MS) {
+                allowed[0] = true;
+                return now;
+            }
+            return previous;
+        });
+        if (lastRejectionAuditAt.size() > 4096) {
+            lastRejectionAuditAt.entrySet().removeIf(entry -> now - entry.getValue() >= REJECTION_AUDIT_INTERVAL_MS);
+        }
+        if (allowed[0]) emit(player, material, itemAmount, identity, false, reason, 0, null, null);
     }
 
     private void finish(UUID uuid, Consumer<PurchaseOutcome> callback, PurchaseOutcome outcome) {
@@ -250,8 +279,7 @@ public class PurchaseService {
     private record DeliveryResult(int delivered, int droppedStacks) {}
 
     private static BigDecimal currentBalance(UUID uuid) {
-        if (WIIC.getEcon() == null) return BigDecimal.ZERO;
-        BigDecimal balance = WIIC.getEcon().balance("iConomyUnlocked", uuid);
+        BigDecimal balance = VaultUtil.balance(uuid);
         return balance != null ? balance : BigDecimal.ZERO;
     }
 

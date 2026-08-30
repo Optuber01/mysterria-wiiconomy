@@ -179,7 +179,7 @@ public class MarketPurchaseService {
                                 balanceBefore, balanceAfterCharge, MysterriaAuditBridge.metadata(
                                         Map.of("listing_id", listing.id().toString()),
                                         MysterriaAuditBridge.itemMetadata(listing.itemBytes()))));
-                refund(buyer, uuid, price, "journal marker failed", identity);
+                refund(buyer, uuid, listing.id(), price, "journal marker failed", identity);
                 // The intent entry has to go with it. Left behind, startup recovery would
                 // read it as an unproven purchase and tell staff to check whether the buyer
                 // was ever refunded — which they just were, right here.
@@ -265,7 +265,7 @@ public class MarketPurchaseService {
                             balanceBefore, balanceAfterCharge, MysterriaAuditBridge.metadata(
                                     Map.of("listing_id", listing.id().toString()),
                                     MysterriaAuditBridge.itemMetadata(listing.itemBytes()))));
-            refund(buyer, uuid, price, "sale commit failed", identity);
+            refund(buyer, uuid, listing.id(), price, "sale commit failed", identity);
             releaseThen(listing, uuid, () -> {
                 journal.remove(attemptId);
                 finish(uuid, callback, Outcome.of(Result.ERROR));
@@ -273,24 +273,22 @@ public class MarketPurchaseService {
         });
     }
 
-    private void refund(Player buyer, UUID uuid, long amount, String reason,
+    private void refund(Player buyer, UUID uuid, UUID listingId, long amount, String reason,
                         MysterriaAuditBridge.AuditIdentity identity) {
         Bukkit.getScheduler().runTaskAsynchronously(plugin, () -> {
             BigDecimal balanceBefore = balance(uuid);
             boolean refunded = VaultUtil.deposit(uuid, amount);
-            MysterriaAuditBridge.emit("agora.purchase.refunded", refunded, uuid, uuid, null, identity,
-                    reason, MysterriaAuditBridge.moneyMetadata(refunded ? amount : 0,
-                            balanceBefore, balance(uuid), Map.of()));
             TransactionLogger.logNote(buyer, "MARKET BUY refund of " + amount + " coppets (" + reason + ") "
                     + (refunded ? "OK" : "FAILED"));
             if (!refunded) plugin.getLogger().severe("Failed to refund " + amount + " coppets to " + uuid);
+            MysterriaAuditBridge.emit("agora.purchase.refunded", refunded, uuid, uuid, listingId, identity,
+                    reason, MysterriaAuditBridge.moneyMetadata(refunded ? amount : 0,
+                            balanceBefore, balance(uuid), Map.of("listing_id", listingId.toString())));
         });
     }
 
     private static BigDecimal balance(UUID uuid) {
-        if (WIIC.getEcon() == null) return BigDecimal.ZERO;
-        BigDecimal balance = WIIC.getEcon().balance("iConomyUnlocked", uuid);
-        return balance != null ? balance : BigDecimal.ZERO;
+        return VaultUtil.balance(uuid);
     }
 
     private void finish(UUID uuid, Consumer<Outcome> callback, Outcome outcome) {

@@ -149,7 +149,7 @@ public class LedgerService {
                     // Deposit landed but the CLAIMED flip failed — recovery replays it from the journal.
                     plugin.getLogger().severe("Ledger finishClaim failed for " + owner.getName()
                             + " (journal will complete on restart): " + error);
-                    MysterriaAuditBridge.emit("ledger.claimed", true, uuid, uuid, null, identity,
+                    MysterriaAuditBridge.emit("ledger.claim_pending_recovery", false, uuid, uuid, null, identity,
                             "proceeds deposited; claim pending recovery", MysterriaAuditBridge.moneyMetadata(sum,
                                     balanceBefore, balanceAfterDeposit, Map.of()));
                     IN_FLIGHT.remove(uuid);
@@ -166,9 +166,7 @@ public class LedgerService {
     }
 
     private static BigDecimal balance(UUID uuid) {
-        if (WIIC.getEcon() == null) return BigDecimal.ZERO;
-        BigDecimal balance = WIIC.getEcon().balance("iConomyUnlocked", uuid);
-        return balance != null ? balance : BigDecimal.ZERO;
+        return VaultUtil.balance(uuid);
     }
 
     private void revert(UUID uuid, Runnable then) {

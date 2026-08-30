@@ -13,6 +13,7 @@ import org.bukkit.persistence.PersistentDataType;
 
 import java.math.BigDecimal;
 import java.nio.charset.StandardCharsets;
+import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.UUID;
@@ -29,7 +30,7 @@ public final class MysterriaAuditBridge {
     private MysterriaAuditBridge() {
     }
 
-    /** Correlates every step of one attempt while retaining a stable domain-facing identifier. */
+    /** Correlates one audit flow while retaining a stable domain-facing identifier. */
     public record AuditIdentity(UUID correlationId, String businessId) {
         public AuditIdentity {
             if (correlationId == null) throw new IllegalArgumentException("correlationId is required");
@@ -42,29 +43,41 @@ public final class MysterriaAuditBridge {
         return new AuditIdentity(correlationId, "wiic:" + domain + ":" + correlationId);
     }
 
+    /** Builds a stable identity for entity-lifecycle and journal-recovery events. */
     public static AuditIdentity identity(String domain, UUID id) {
         return new AuditIdentity(id, "wiic:" + domain + ":" + id);
     }
 
     public static AuditIdentity identity(String domain, String id) {
+        String safeId = id == null ? "" : id;
         UUID correlationId;
         try {
-            correlationId = UUID.fromString(id);
+            correlationId = UUID.fromString(safeId);
         } catch (IllegalArgumentException invalidUuid) {
-            correlationId = UUID.nameUUIDFromBytes((domain + ":" + id).getBytes(StandardCharsets.UTF_8));
+            correlationId = UUID.nameUUIDFromBytes((domain + ":" + safeId).getBytes(StandardCharsets.UTF_8));
         }
-        return new AuditIdentity(correlationId, "wiic:" + domain + ":" + id);
+        return new AuditIdentity(correlationId, "wiic:" + domain + ":" + safeId);
     }
 
     public static void emitWallet(String operation, Player player, ItemStack item,
                                   long amount, boolean success, BigDecimal before,
                                   BigDecimal after, AuditIdentity identity) {
-        if (player == null || item == null) return;
-        Map<String, Object> metadata = moneyMetadata(operation.equals("withdrawn") ? -amount : amount,
-                before, after, itemMetadata(item));
-        metadata.put("success", success);
-        emit("wallet." + operation, success, player.getUniqueId(), player.getUniqueId(), null,
-                identity, success ? null : operation + " failed", metadata);
+        try {
+            if (player == null || operation == null || operation.isBlank()) return;
+            long delta = switch (operation) {
+                case "withdrawn" -> -amount;
+                case "deposited", "sold" -> amount;
+                default -> 0;
+            };
+            Map<String, Object> metadata = moneyMetadata(delta,
+                    before, after, itemMetadata(item));
+            metadata.put("success", success);
+            UUID playerId = player.getUniqueId();
+            emit("wallet." + operation, success, playerId, playerId, null,
+                    identity, success ? null : operation + " failed", metadata);
+        } catch (RuntimeException | LinkageError ignored) {
+            // Audit metadata construction is best effort too; it must not gate item recovery.
+        }
     }
 
     /** Generic WIIC event helper. All callers pass only immutable values. */
@@ -75,7 +88,11 @@ public final class MysterriaAuditBridge {
             MysterriaAudit audit = Bukkit.getServicesManager().load(MysterriaAudit.class);
             if (audit == null) return;
             Map<String, Object> copy = new LinkedHashMap<>();
-            if (metadata != null) metadata.forEach(copy::put);
+            if (metadata != null) {
+                metadata.forEach((key, value) -> {
+                    if (key != null && !key.isBlank()) copy.put(key, value);
+                });
+            }
             audit.emit(new AuditEmission(
                     "mysterria-wiiconomy." + operation,
                     outcome,
@@ -87,7 +104,7 @@ public final class MysterriaAuditBridge {
                     subjectId,
                     targetId,
                     reason,
-                    Map.copyOf(copy)));
+                    Collections.unmodifiableMap(copy)));
         } catch (RuntimeException | LinkageError ignored) {
             // Audit is best effort and must never alter WIIC behavior.
         }
@@ -147,6 +164,11 @@ public final class MysterriaAuditBridge {
     }
 
     private static void copyString(String value, String key, Map<String, Object> target) {
-        if (value != null && !value.isBlank()) target.put(key, value);
+        if (value == null || value.isBlank()) return;
+        try {
+            target.put(key, UUID.fromString(value.trim()).toString());
+        } catch (IllegalArgumentException ignored) {
+            // Physical identity fields are UUIDs; ignore malformed player-controlled PDC data.
+        }
     }
 }
