@@ -729,6 +729,7 @@ public class PlotService {
         metadata.put("plot_id", plotId);
         metadata.put("harvested_stacks", harvested == null ? 0 : harvested.size());
         Map<String, Long> totals = new LinkedHashMap<>();
+        List<Map<String, Object>> summaries = new ArrayList<>();
         if (harvested != null) {
             for (StashItem item : harvested) {
                 String material = item.material().name().toLowerCase();
@@ -737,10 +738,27 @@ public class PlotService {
                 } else {
                     totals.merge("other", (long) item.amount(), Long::sum);
                 }
+                if (summaries.size() < 64) {
+                    Map<String, Object> summary = new LinkedHashMap<>();
+                    summary.put("material", material);
+                    summary.put("amount", item.amount());
+                    Map<String, Object> itemProjection = MysterriaAuditBridge.itemMetadata(item.itemBytes());
+                    copyIdentity(itemProjection, summary, "item_uuid");
+                    copyIdentity(itemProjection, summary, "parent_item_uuid");
+                    summaries.add(summary);
+                }
             }
         }
         metadata.put("harvested_items", totals);
+        metadata.put("harvested_item_summaries", summaries);
+        metadata.put("harvested_item_summaries_truncated",
+                harvested != null && harvested.size() > summaries.size());
         return metadata;
+    }
+
+    private static void copyIdentity(Map<String, Object> source, Map<String, Object> target, String key) {
+        Object value = source.get(key);
+        if (value != null) target.put(key, value);
     }
 
     /** Expected rent/upkeep rejections decided inside the DB transaction, not failures. */

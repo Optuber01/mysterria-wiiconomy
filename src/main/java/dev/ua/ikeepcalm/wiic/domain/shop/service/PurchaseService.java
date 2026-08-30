@@ -55,6 +55,7 @@ public class PurchaseService {
     // cannot enter the pipeline while one is already in flight, regardless of timing.
     private static final Set<UUID> IN_FLIGHT = ConcurrentHashMap.newKeySet();
     private static final long REJECTION_AUDIT_INTERVAL_MS = 1_000L;
+    private static final int MAX_REJECTION_AUDIT_ENTRIES = 4_096;
 
     private final WIIC plugin;
     private final ShopConfig shopConfig;
@@ -134,7 +135,7 @@ public class PurchaseService {
 
             if (before.compareTo(BigDecimal.valueOf(total)) < 0) {
                 TransactionLogger.logPurchase(player, material, amount, total, indexAtPurchase, false);
-                emit(player, material, amount, identity, false, "insufficient funds", total, before, before);
+                emitInsufficientFunds(player, material, amount, identity, total, before);
                 Bukkit.getScheduler().runTask(plugin, () ->
                         finish(uuid, callback, new PurchaseOutcome(Result.INSUFFICIENT_FUNDS, chargedUnitPrice, total, 0, 0)));
                 return;
@@ -229,23 +230,41 @@ public class PurchaseService {
         }
     }
 
+    private static void emitInsufficientFunds(Player player, Material material, int itemAmount,
+                                              MysterriaAuditBridge.AuditIdentity identity,
+                                              long attemptedTotal, BigDecimal balance) {
+        try {
+            if (player == null || material == null) return;
+            UUID playerId = player.getUniqueId();
+            MysterriaAuditBridge.emit("shop.purchased", false, playerId, playerId, null, identity,
+                    "insufficient funds", MysterriaAuditBridge.moneyMetadata(0, balance, balance,
+                            Map.of("material", material.name().toLowerCase(),
+                                    "item_amount", itemAmount, "attempted_total", attemptedTotal)));
+        } catch (RuntimeException | LinkageError ignored) {
+            // Audit is best effort and must never affect the purchase result.
+        }
+    }
+
     private void emitRejected(Player player, Material material, int itemAmount,
                               MysterriaAuditBridge.AuditIdentity identity, String reason) {
         UUID playerId = player.getUniqueId();
         long now = System.currentTimeMillis();
         RejectionKey key = new RejectionKey(playerId, material, reason);
-        boolean[] allowed = {false};
-        lastRejectionAuditAt.compute(key, (ignored, previous) -> {
-            if (previous == null || now - previous >= REJECTION_AUDIT_INTERVAL_MS) {
-                allowed[0] = true;
-                return now;
+        synchronized (lastRejectionAuditAt) {
+            Long previous = lastRejectionAuditAt.get(key);
+            if (previous != null && now - previous < REJECTION_AUDIT_INTERVAL_MS) {
+                return;
             }
-            return previous;
-        });
-        if (lastRejectionAuditAt.size() > 4096) {
-            lastRejectionAuditAt.entrySet().removeIf(entry -> now - entry.getValue() >= REJECTION_AUDIT_INTERVAL_MS);
+            if (previous == null) {
+                while (lastRejectionAuditAt.size() >= MAX_REJECTION_AUDIT_ENTRIES) {
+                    var iterator = lastRejectionAuditAt.keySet().iterator();
+                    if (!iterator.hasNext()) break;
+                    lastRejectionAuditAt.remove(iterator.next());
+                }
+            }
+            lastRejectionAuditAt.put(key, now);
         }
-        if (allowed[0]) emit(player, material, itemAmount, identity, false, reason, 0, null, null);
+        emit(player, material, itemAmount, identity, false, reason, 0, null, null);
     }
 
     private void finish(UUID uuid, Consumer<PurchaseOutcome> callback, PurchaseOutcome outcome) {

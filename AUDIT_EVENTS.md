@@ -34,7 +34,7 @@ reconciliation rather than counting the same debit twice.
 | Event | Commit/failure point | Main metadata |
 | --- | --- | --- |
 | `wallet.deposited`, `wallet.withdrawn`, `wallet.sold` | Vault wallet operation result | monetary projection, item projection, success |
-| `shop.purchased`, `shop.refunded` | Admin shop charge/delivery/refund | monetary projection, material, item_amount, outcome reason |
+| `shop.purchased`, `shop.refunded` | Admin shop charge/delivery/refund | monetary projection, material, item_amount, attempted_total when declined, outcome reason |
 | `agora.listing.created`, `agora.listing.cancelled` | Listing DB commit | listing_id, price, fee, item projection, plot_id |
 | `agora.listing.failed`, `agora.listing.fee_refunded` | Listing validation/charge/insert failure | price, fee, listing/request id, reason |
 | `agora.purchase.completed`, `agora.purchase.failed`, `agora.purchase.refunded` | Market reservation, sale commit, and refund | monetary projection, listing_id, tax, net, item projection |
@@ -50,10 +50,10 @@ reconciliation rather than counting the same debit twice.
 | `plots.rent.charge_pending`, `plots.rent.committed`, `plots.rent.failed` | Plot rent charge and DB claim | monetary projection, plot_id, paid_until, reason |
 | `plots.rent.charge_pending`, `plots.rent.upkeep`, `plots.rent.upkeep_failed` | Plot extension charge and DB update | monetary projection, plot_id, paid_until |
 | `plots.rent.refunded` | Failed rent/upkeep refund | original rent/upkeep identity, monetary projection, plot_id, operation, reason |
-| `plots.eviction.committed`, `plots.eviction.failed` | Eviction DB commit | plot_id, harvested_stacks, reason |
+| `plots.eviction.committed`, `plots.eviction.failed` | Eviction DB commit | plot_id, harvested_stacks, material totals, bounded item summaries, reason |
 | `plot_shop.created`, `plot_shop.create_failed` | Stall counter DB insert | plot_id, price, bundle |
 | `plot_shop.updated`, `plot_shop.update_failed` | Stall goods/price mutation | plot_id, price, stocked, item projection |
-| `plot_shop.purchase_completed`, `plot_shop.purchase_failed` | Stall charge, stock, and ledger result | purchase identity, monetary projection, plot_id, tax, net, item projection |
+| `plot_shop.purchase_completed`, `plot_shop.purchase_failed` | Stall charge, stock, and ledger result | purchase identity, monetary projection, plot_id, quantity, tax, net, item projection |
 | `plot_shop.ledger_failed`, `plot_shop.refunded` | Stall ledger failure/refund | purchase identity, monetary projection, plot_id, shop_id, net, reason |
 
 An Agora purchase uses its journal attempt ID as the business identity, while `listing_id`

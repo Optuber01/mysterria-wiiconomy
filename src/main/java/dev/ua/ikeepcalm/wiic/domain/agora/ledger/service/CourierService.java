@@ -277,7 +277,10 @@ public class CourierService {
                 revertClaim(stashId);
                 MysterriaAuditBridge.emit("courier.delivery.failed", false, uuid, sellerUuid, stashId, identity,
                         "courier rejected delivery", MysterriaAuditBridge.moneyMetadata(0,
-                                Map.of("fee", fee, "stash_id", stashId.toString())));
+                                MysterriaAuditBridge.metadata(
+                                        Map.of("fee", fee, "courier_type", tier,
+                                                "stash_id", stashId.toString()),
+                                        MysterriaAuditBridge.itemMetadata(item))));
                 callback.accept(false);
                 return;
             }
@@ -294,7 +297,10 @@ public class CourierService {
             plugin.getLogger().severe("Courier claim failed for " + buyer.getName() + ": " + error);
             MysterriaAuditBridge.emit("courier.delivery.failed", false, uuid, sellerUuid, stashId, identity,
                     "courier claim failed", MysterriaAuditBridge.moneyMetadata(0,
-                            Map.of("fee", fee, "stash_id", stashId.toString())));
+                            MysterriaAuditBridge.metadata(
+                                    Map.of("fee", fee, "courier_type", "unknown",
+                                            "stash_id", stashId.toString()),
+                                    MysterriaAuditBridge.itemMetadata(itemBytes))));
             callback.accept(false);
         });
     }

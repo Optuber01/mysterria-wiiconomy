@@ -91,6 +91,7 @@ public class PlotShopService {
     private static final Set<UUID> BUYERS_IN_FLIGHT = ConcurrentHashMap.newKeySet();
     private static final Set<UUID> SHOPS_IN_FLIGHT = ConcurrentHashMap.newKeySet();
     private static final long REJECTION_AUDIT_INTERVAL_MS = 1_000L;
+    private static final int MAX_REJECTION_AUDIT_ENTRIES = 4_096;
 
     private final WIIC plugin;
     private final MarketConfig config;
@@ -457,7 +458,8 @@ public class PlotShopService {
                         + " coppets failed at " + shop.plotId());
                 MysterriaAuditBridge.emit("plot_shop.purchase_failed", false, buyerId, shop.ownerUuid(), shop.id(), identity,
                         "insufficient funds", MysterriaAuditBridge.moneyMetadata(0, balanceBefore, balance(buyerId),
-                                MysterriaAuditBridge.metadata(Map.of("plot_id", shop.plotId()),
+                                MysterriaAuditBridge.metadata(Map.of("plot_id", shop.plotId(),
+                                                "quantity", wanted),
                                         MysterriaAuditBridge.itemMetadata(template))));
                 finish(buyerId, shop.id(), callback, Purchase.of(BuyResult.INSUFFICIENT_FUNDS));
                 return;
@@ -471,7 +473,8 @@ public class PlotShopService {
                 if (live == null || !takeStock(live, template, wanted)) {
                     MysterriaAuditBridge.emit("plot_shop.purchase_failed", false, buyerId, shop.ownerUuid(), shop.id(), identity,
                             "stock unavailable", MysterriaAuditBridge.moneyMetadata(-price,
-                                    balanceBefore, balanceAfterCharge, Map.of("plot_id", shop.plotId())));
+                                    balanceBefore, balanceAfterCharge, Map.of("plot_id", shop.plotId(),
+                                            "quantity", wanted)));
                     refund(buyer, buyerId, shop.id(), shop.plotId(), price,
                             "stock gone before the counter could hand it over", identity);
                     finish(buyerId, shop.id(), callback, Purchase.of(BuyResult.OUT_OF_STOCK));
@@ -515,7 +518,8 @@ public class PlotShopService {
                     "plot shop purchase committed", MysterriaAuditBridge.moneyMetadata(-price,
                             balanceBefore, balanceAfterCharge, MysterriaAuditBridge.metadata(
                                     Map.of("plot_id", shop.plotId(), "tax", tax, "net", net,
-                                            "item_name", itemName), MysterriaAuditBridge.itemMetadata(shop.itemBytes()))));
+                                            "item_name", itemName, "quantity", amount),
+                                    MysterriaAuditBridge.itemMetadata(shop.itemBytes()))));
             notifier.sold(shop.ownerUuid());
             feedback.dealStruck(buyer);
             finish(buyerId, shop.id(), callback, new Purchase(BuyResult.SUCCESS, price, amount, itemName));
@@ -528,7 +532,8 @@ public class PlotShopService {
                     + " (" + shop.ownerUuid() + ") for " + itemName + " x" + amount);
             MysterriaAuditBridge.emit("plot_shop.ledger_failed", false, buyerId, shop.ownerUuid(), shop.id(), identity,
                     "plot shop ledger write failed", MysterriaAuditBridge.moneyMetadata(-price,
-                            balanceBefore, balanceAfterCharge, Map.of("plot_id", shop.plotId(), "net", net)));
+                            balanceBefore, balanceAfterCharge, Map.of("plot_id", shop.plotId(), "net", net,
+                                    "quantity", amount)));
             finish(buyerId, shop.id(), callback, new Purchase(BuyResult.SUCCESS, price, amount, itemName));
         });
     }
@@ -654,18 +659,21 @@ public class PlotShopService {
     private boolean shouldEmitRejection(UUID buyerId, UUID shopId, String reason) {
         long now = System.currentTimeMillis();
         RejectionKey key = new RejectionKey(buyerId, shopId, reason);
-        boolean[] allowed = {false};
-        lastRejectionAuditAt.compute(key, (ignored, previous) -> {
-            if (previous == null || now - previous >= REJECTION_AUDIT_INTERVAL_MS) {
-                allowed[0] = true;
-                return now;
+        synchronized (lastRejectionAuditAt) {
+            Long previous = lastRejectionAuditAt.get(key);
+            if (previous != null && now - previous < REJECTION_AUDIT_INTERVAL_MS) {
+                return false;
             }
-            return previous;
-        });
-        if (lastRejectionAuditAt.size() > 4096) {
-            lastRejectionAuditAt.entrySet().removeIf(entry -> now - entry.getValue() >= REJECTION_AUDIT_INTERVAL_MS);
+            if (previous == null) {
+                while (lastRejectionAuditAt.size() >= MAX_REJECTION_AUDIT_ENTRIES) {
+                    var iterator = lastRejectionAuditAt.keySet().iterator();
+                    if (!iterator.hasNext()) break;
+                    lastRejectionAuditAt.remove(iterator.next());
+                }
+            }
+            lastRejectionAuditAt.put(key, now);
+            return true;
         }
-        return allowed[0];
     }
 
     private void finish(UUID buyerId, UUID shopId, Consumer<Purchase> callback, Purchase outcome) {

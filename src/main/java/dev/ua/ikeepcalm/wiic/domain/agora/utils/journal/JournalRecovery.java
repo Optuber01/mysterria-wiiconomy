@@ -209,7 +209,9 @@ public class JournalRecovery {
                 plugin.getLogger().warning("Recovery refunded " + amount + " coppets to " + buyer);
             }
             MysterriaAuditBridge.emit("agora.purchase.recovery_refunded", refunded,
-                    buyer, buyer, listingId, identity, "interrupted purchase refunded by recovery",
+                    buyer, buyer, listingId, identity,
+                    refunded ? "interrupted purchase refunded by recovery"
+                            : "recovery refund failed; manual repair needed",
                     MysterriaAuditBridge.moneyMetadata(refunded ? amount : 0,
                             balanceBefore, balance(buyer), Map.of("listing_id", listingId.toString())));
         };
