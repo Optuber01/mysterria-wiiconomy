@@ -1,11 +1,9 @@
 package dev.ua.ikeepcalm.wiic.utils;
 
-import dev.ua.ikeepcalm.coi.api.audit.AuditEmission;
-import dev.ua.ikeepcalm.coi.api.audit.AuditOutcome;
-import dev.ua.ikeepcalm.coi.api.audit.AuditPrivacy;
-import dev.ua.ikeepcalm.coi.api.audit.AuditRisk;
-import dev.ua.ikeepcalm.coi.api.audit.MysterriaAudit;
-import org.bukkit.Bukkit;
+import dev.ua.ikeepcalm.mysterria.audit.client.api.AuditProducer;
+import dev.ua.ikeepcalm.mysterria.audit.client.api.AuditOutcome;
+import dev.ua.ikeepcalm.mysterria.audit.client.api.AuditPrivacy;
+import dev.ua.ikeepcalm.mysterria.audit.client.api.AuditRisk;
 import org.bukkit.NamespacedKey;
 import org.bukkit.entity.Player;
 import org.bukkit.inventory.ItemStack;
@@ -26,8 +24,20 @@ public final class MysterriaAuditBridge {
             new NamespacedKey("circleofimagination", "item_uuid");
     private static final NamespacedKey PARENT_ITEM_UUID_PDC =
             new NamespacedKey("circleofimagination", "item_parent_uuid");
+    private static AuditProducer producer;
 
     private MysterriaAuditBridge() {
+    }
+
+    public static void initialize(dev.ua.ikeepcalm.wiic.WIIC plugin) {
+        producer = AuditProducer.create(plugin.getDataFolder().toPath().toAbsolutePath().getParent(),
+                "mysterria-wiiconomy", plugin.getPluginMeta().getVersion());
+    }
+
+    public static void close() {
+        AuditProducer current = producer;
+        producer = null;
+        if (current != null) current.close();
     }
 
     /** Correlates one audit flow while retaining a stable domain-facing identifier. */
@@ -85,26 +95,17 @@ public final class MysterriaAuditBridge {
                             UUID subjectId, UUID targetId, AuditIdentity identity,
                             String reason, Map<String, ?> metadata) {
         try {
-            MysterriaAudit audit = Bukkit.getServicesManager().load(MysterriaAudit.class);
-            if (audit == null) return;
+            AuditProducer current = producer;
+            if (current == null) return;
             Map<String, Object> copy = new LinkedHashMap<>();
             if (metadata != null) {
                 metadata.forEach((key, value) -> {
                     if (key != null && !key.isBlank()) copy.put(key, value);
                 });
             }
-            audit.emit(new AuditEmission(
-                    "mysterria-wiiconomy." + operation,
-                    outcome,
-                    AuditRisk.NORMAL,
-                    AuditPrivacy.STAFF_RESTRICTED,
-                    identity.correlationId(),
-                    identity.businessId(),
-                    actorId,
-                    subjectId,
-                    targetId,
-                    reason,
-                    Collections.unmodifiableMap(copy)));
+            current.emit("mysterria-wiiconomy." + operation, outcome, AuditRisk.NORMAL,
+                    AuditPrivacy.STAFF_RESTRICTED, identity.correlationId(), identity.businessId(),
+                    actorId, subjectId, targetId, reason, Collections.unmodifiableMap(copy));
         } catch (RuntimeException | LinkageError ignored) {
             // Audit is best effort and must never alter WIIC behavior.
         }

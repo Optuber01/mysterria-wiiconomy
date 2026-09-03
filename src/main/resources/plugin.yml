@@ -3,7 +3,7 @@ version: '${version}'
 main: dev.ua.ikeepcalm.wiic.WIIC
 api-version: '1.21'
 depend: [ iConomyUnlocked, Vault, CircleOfImagination ]
-softdepend: [ Citizens, Lands, Worlds, UndeadPostmans, MysterriaLogging ]
+softdepend: [ Citizens, Lands, Worlds, UndeadPostmans ]
 commands:
   wallet:
     description: Check your wallet debug information

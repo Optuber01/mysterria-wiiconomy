@@ -1,5 +1,7 @@
 package dev.ua.ikeepcalm.wiic;
 
+import dev.ua.ikeepcalm.wiic.utils.MysterriaAuditBridge;
+
 import dev.ua.ikeepcalm.wiic.commands.*;
 import dev.ua.ikeepcalm.wiic.config.ShopConfig;
 import dev.ua.ikeepcalm.wiic.config.WalletConfig;
@@ -50,6 +52,7 @@ public class WIIC extends JavaPlugin {
 
     @Override
     public void onEnable() {
+        MysterriaAuditBridge.initialize(this);
         INSTANCE = this;
         pluginNamespace = new NamespacedKey(this, "dummy").getNamespace();
 
@@ -109,6 +112,7 @@ public class WIIC extends JavaPlugin {
 
     @Override
     public void onDisable() {
+        MysterriaAuditBridge.close();
         if (marketModule != null) marketModule.shutdown();
         if (shopServices != null) shopServices.marketIndex().stop();
         // Static, so it survives a plugin reload. A purchase whose callback was dropped
