@@ -110,7 +110,7 @@ dependencies {
     } else {
         compileOnly 'dev.ua.ikeepcalm:circle-of-imagination-api:1.4.8-SNAPSHOT'
     }
-    implementation 'dev.ua.ikeepcalm.mysterria:audit-client:1.0.0-SNAPSHOT'
+    implementation 'dev.ua.ikeepcalm.mysterria:audit-client:1.0.0'
 }
 
 

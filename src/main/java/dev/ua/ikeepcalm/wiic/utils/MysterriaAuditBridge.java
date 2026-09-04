@@ -30,7 +30,8 @@ public final class MysterriaAuditBridge {
     }
 
     public static void initialize(dev.ua.ikeepcalm.wiic.WIIC plugin) {
-        producer = AuditProducer.create(plugin.getDataFolder().toPath().toAbsolutePath().getParent(),
+        producer = AuditProducer.create(plugin.getDataFolder().toPath().toAbsolutePath().getParent()
+                        .resolve("mysterria-audit-spool"),
                 "mysterria-wiiconomy", plugin.getPluginMeta().getVersion());
     }
 
