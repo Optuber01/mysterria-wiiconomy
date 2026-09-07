@@ -11,7 +11,6 @@ import org.bukkit.persistence.PersistentDataType;
 
 import java.math.BigDecimal;
 import java.nio.charset.StandardCharsets;
-import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.UUID;
@@ -24,7 +23,7 @@ public final class MysterriaAuditBridge {
             new NamespacedKey("circleofimagination", "item_uuid");
     private static final NamespacedKey PARENT_ITEM_UUID_PDC =
             new NamespacedKey("circleofimagination", "item_parent_uuid");
-    private static AuditProducer producer;
+    private static volatile AuditProducer producer;
 
     private MysterriaAuditBridge() {
     }
@@ -98,17 +97,13 @@ public final class MysterriaAuditBridge {
         try {
             AuditProducer current = producer;
             if (current == null) return;
-            Map<String, Object> copy = new LinkedHashMap<>();
-            if (metadata != null) {
-                metadata.forEach((key, value) -> {
-                    if (key != null && !key.isBlank()) copy.put(key, value);
-                });
-            }
             current.emit("mysterria-wiiconomy." + operation, outcome, AuditRisk.NORMAL,
                     AuditPrivacy.STAFF_RESTRICTED, identity.correlationId(), identity.businessId(),
-                    actorId, subjectId, targetId, reason, Collections.unmodifiableMap(copy));
+                    actorId, subjectId, targetId, reason, metadata);
         } catch (RuntimeException | LinkageError ignored) {
             // Audit is best effort and must never alter WIIC behavior.
+            AuditProducer current = producer;
+            if (current != null) current.recordFailure();
         }
     }
 
@@ -124,7 +119,7 @@ public final class MysterriaAuditBridge {
                                                      Map<String, ?> extra) {
         Map<String, Object> metadata = new LinkedHashMap<>();
         metadata.put("currency", "coppets");
-        metadata.put("amount", Math.abs(delta));
+        metadata.put("amount", BigDecimal.valueOf(delta).abs());
         metadata.put("delta", delta);
         if (before != null) metadata.put("balance_before", before);
         if (after != null) metadata.put("balance_after", after);
@@ -139,13 +134,18 @@ public final class MysterriaAuditBridge {
     /** Bounded item projection, including canonical physical UUID keys when present. */
     public static Map<String, Object> itemMetadata(ItemStack item) {
         Map<String, Object> metadata = new LinkedHashMap<>();
-        if (item == null) return metadata;
-        metadata.put("material", item.getType().name().toLowerCase());
-        metadata.put("item_amount", item.getAmount());
-        if (!item.hasItemMeta()) return metadata;
-        var pdc = item.getItemMeta().getPersistentDataContainer();
-        copyString(pdc.get(ITEM_UUID_PDC, PersistentDataType.STRING), ITEM_UUID_KEY, metadata);
-        copyString(pdc.get(PARENT_ITEM_UUID_PDC, PersistentDataType.STRING), PARENT_ITEM_UUID_KEY, metadata);
+        try {
+            if (item == null) return metadata;
+            metadata.put("material", item.getType().name().toLowerCase());
+            metadata.put("item_amount", item.getAmount());
+            if (!item.hasItemMeta()) return metadata;
+            var pdc = item.getItemMeta().getPersistentDataContainer();
+            copyString(pdc.get(ITEM_UUID_PDC, PersistentDataType.STRING), ITEM_UUID_KEY, metadata);
+            copyString(pdc.get(PARENT_ITEM_UUID_PDC, PersistentDataType.STRING), PARENT_ITEM_UUID_KEY, metadata);
+        } catch (RuntimeException | LinkageError ignored) {
+            AuditProducer current = producer;
+            if (current != null) current.recordFailure();
+        }
         return metadata;
     }
 

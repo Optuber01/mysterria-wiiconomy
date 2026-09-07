@@ -112,12 +112,13 @@ public class WIIC extends JavaPlugin {
 
     @Override
     public void onDisable() {
-        MysterriaAuditBridge.close();
         if (marketModule != null) marketModule.shutdown();
         if (shopServices != null) shopServices.marketIndex().stop();
         // Static, so it survives a plugin reload. A purchase whose callback was dropped
         // during shutdown would otherwise leave that player permanently unable to buy.
         PurchaseService.releaseAll();
+        MysterriaAuditBridge.close();
+        dev.ua.ikeepcalm.wiic.utils.TransactionLogger.shutdown();
         getLogger().info("WIIC plugin disabled...");
     }
 

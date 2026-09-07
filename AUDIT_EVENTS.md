@@ -1,9 +1,8 @@
 # WIIC audit events
 
-WIIC emits best-effort events to the shared `MysterriaAudit` service. Events are emitted
-after the owning operation has a final result; a missing or failing provider never changes
-gameplay. Existing `TransactionLogger` text records remain enabled during the review window
-and are the operational fallback until parity is confirmed.
+WIIC emits best-effort events through its shaded neutral audit client after the owning operation reaches a final result. Audit failures do not change gameplay. Existing transaction text records retain their separate operational coverage.
+
+The optional per-server audit engine owns SQLite and local staff searches. Each producer writes to its own bounded spool directory even when the engine is absent. Existing gameplay dependencies remain separate from audit transport.
 
 ## Event contract
 
