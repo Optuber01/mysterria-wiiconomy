@@ -59,3 +59,10 @@ An Agora purchase uses its journal attempt ID as the business identity, while `l
 remains the purchased resource. WIIC courier events retain that purchase identity and expose
 the stash row separately as `stash_id`, allowing downstream Delivery emitters to reuse the
 same business ID without conflating a purchase, listing, and stash record.
+# History ownership
+
+`logging.legacy-text-history` defaults to false: wallet/market text files are an optional
+compatibility export. Existing files are not deleted. The SQL transactions trail remains part
+of the atomic sale transaction; the shared audit feed cannot replace its durability guarantee.
+Listings, proceeds, stash and the fsynced market recovery journal remain authoritative state.
+Actionable failure diagnostics remain available independently of either history export.

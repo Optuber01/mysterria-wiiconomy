@@ -253,3 +253,7 @@ villagers:
 
 debug:
   villager-listener: false
+# Optional compatibility export for staff tools that still consume logs/<player>.log.
+# The market transactions table, recovery journal and shared audit stay active.
+logging:
+  legacy-text-history: false

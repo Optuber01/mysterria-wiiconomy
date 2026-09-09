@@ -84,6 +84,9 @@ public class TransactionLogger {
     }
 
     private static void write(Player player, String body) {
+        // Compatibility export only. Canonical market SQL history and shared audit
+        // remain active; no gameplay/recovery state depends on these text files.
+        if (!WIIC.INSTANCE.getConfig().getBoolean("logging.legacy-text-history", false)) return;
         UUID id = player.getUniqueId();
         String name = player.getName().replaceAll("[^A-Za-z0-9_-]", "_");
         if (name.length() > 64) name = name.substring(0, 64);
